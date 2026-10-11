@@ -449,18 +449,38 @@ app.put('/api/settings', ...adminOnly, wrap((req, res) => {
   res.json({ ok: true });
 }));
 
-/* ---------- AI (Claude) ---------- */
-async function claude(system, messages, max = 900) {
-  const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) { const e = new Error("AI hali ulanmagan: serverda ANTHROPIC_API_KEY o'rnatilishi kerak"); e.soft = true; throw e; }
-  const r = await fetch('https://api.anthropic.com/v1/messages', {
+/* ---------- AI (Google Gemini) ---------- */
+async function gemini(system, messages, max = 1000) {
+  const key = process.env.GEMINI_API_KEY || process.env.ANTHROPIC_API_KEY;
+  if (!key) { 
+    const e = new Error("AI hali ulanmagan: serverda GEMINI_API_KEY o'rnatilishi kerak"); 
+    e.soft = true; 
+    throw e; 
+  }
+
+  // Gemini uchun rolingizni o'giramiz (assistant -> model)
+  const contents = messages.map(m => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: String(m.content) }]
+  }));
+
+  const modelName = process.env.AI_MODEL || 'gemini-1.5-flash';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${key}`;
+
+  const response = await fetch(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-    body: JSON.stringify({ model: process.env.AI_MODEL || 'claude-sonnet-5-5', max_tokens: max, system, messages })
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: system }] },
+      contents,
+      generationConfig: { maxOutputTokens: max }
+    })
   });
-  const d = await r.json();
-  if (!r.ok) throw new Error(d.error?.message || 'AI xatosi');
-  return (d.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
+
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error?.message || 'Gemini AI xatosi yuz berdi');
+  
+  return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
 }
 
 const hits = new Map();
@@ -487,28 +507,9 @@ app.post('/api/ai', auth(false), wrap(async (req, res) => {
     const ls = db.prepare('SELECT title FROM lessons WHERE course_id=? ORDER BY position').all(c.id).map(l => l.title).join(', ');
     system += `\n\nFoydalanuvchi hozir «${c.title}» kursini ko'ryapti. Tavsif: ${c.description}. Darslar: ${ls || "yo'q"}.`;
   }
-  try { res.json({ reply: await claude(system, msgs) }); }
+  try { res.json({ reply: await gemini(system, msgs) }); }
   catch (e) { if (e.soft) return res.json({ reply: e.message }); throw e; }
 }));
-
-app.post('/api/ai/generate-test', ...staff, wrap(async (req, res) => {
-  const c = getCourse(parseInt(req.body.courseId, 10));
-  if (!c || !isManager(c, req.user)) return bad(res, "Ruxsat yo'q", 403);
-  if (limited('gen' + req.user.id, 6)) return bad(res, 'Biroz kuting', 429);
-  const topic = clean(req.body.topic, 200) || c.title;
-  const count = Math.min(Math.max(parseInt(req.body.count, 10) || 5, 1), 15);
-  let text;
-  try {
-    text = await claude("Sen o'quv markaz uchun test savollari tuzuvchi yordamchisan. Faqat JSON qaytar, boshqa matn yozma.",
-      [{ role: 'user', content: `Kurs: ${c.title}\nMavzu: ${topic}\n${count} ta ko'p variantli savol tuz (o'zbek tilida, har birida 4 ta variant). Format: [{"text":"savol","options":["A","B","C","D"],"answer":0}] — answer to'g'ri variant indeksi (0-3).` }], 3000);
-  } catch (e) { return bad(res, e.message, e.soft ? 503 : 500); }
-  const a = text.indexOf('['), b = text.lastIndexOf(']');
-  let qs = null;
-  try { qs = validQuestions(JSON.parse(text.slice(a, b + 1))); } catch { /* */ }
-  if (!qs) return bad(res, "AI javobini o'qib bo'lmadi, qayta urinib ko'ring", 502);
-  res.json({ questions: qs });
-}));
-
 /* ---------- Realtime ---------- */
 io.use((socket, next) => {
   const t = socket.handshake.auth && socket.handshake.auth.token;
