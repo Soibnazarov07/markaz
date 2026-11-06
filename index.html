@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="uz" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b1020">
+  <meta name="description" content="Kurslar, jonli darslar, testlar va o'qituvchilar bilan aloqa — yagona ta'lim platformasi.">
+  <title>O'quv Markaz | Platforma</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/design.css">
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar" id="sidebar">
+    <a href="#/" class="brand"><span class="logo">✦</span><span class="brand-copy"><strong id="brandName">O'quv Markaz</strong><small>Learning management</small></span></a>
+    <div class="sidebar-caption">ASOSIY MENYU</div>
+    <nav id="dock" class="dock" aria-label="Asosiy navigatsiya"></nav>
+    <div class="sidebar-bottom"><div class="sidebar-support"><div class="support-icon">◈</div><b>Platforma yordamchisi</b><p>O'qish bilan bog'liq savollaringiz bormi?</p><button class="btn sm" data-act="aiToggle">AI ustoz ↗</button></div><small class="side-footer">© 2026 Learning Platform</small></div>
+  </aside>
+  <div class="workspace">
+    <header class="topbar"><div class="top-heading"><button class="menu-toggle" type="button" aria-label="Menyuni ochish" data-act="menuToggle">☰</button><div><span class="breadcrumb">BILIM · RIVOJLANISH · NATIJA</span><b id="currentPage">Bosh sahifa</b></div></div><div class="header-actions"><div class="presence"><span class="dot live"></span> <b data-live="online">0</b> onlayn</div><div id="right" class="right"></div></div></header>
+    <main id="view" tabindex="-1"></main>
+    <footer class="workspace-footer">Professional ta'lim boshqaruv platformasi <span>Secure • Realtime • Education</span></footer>
+  </div>
+</div>
+<button class="fab" data-act="aiToggle" aria-label="AI yordamchi">✦</button>
+<section class="aip glass hide" id="aip" aria-label="AI yordamchi">
+  <div class="aih"><span>✦ AI yordamchi</span><button class="btn sm" data-act="aiToggle">Yopish</button></div>
+  <div class="aim" id="aim"></div>
+  <div class="aif"><input class="in" id="aiIn" placeholder="Savolingizni yozing..." autocomplete="off"><button class="btn primary" data-act="aiSend">➜</button></div>
+</section>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<script src="/socket.io/socket.io.js"></script>
+<script src="/app.js"></script>
+<script src="/features-ui.js"></script>
+</body>
+</html>

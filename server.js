@@ -58,6 +58,10 @@ if (!getSetting('tagline')) setSetting('tagline', "Bilimni zamonaviy usulda olin
 let SECRET = process.env.JWT_SECRET || getSetting('jwt_secret');
 if (!SECRET) { SECRET = crypto.randomBytes(32).toString('hex'); setSetting('jwt_secret', SECRET); }
 
+if (process.env.NODE_ENV === 'production' && (!process.env.ADMIN_PASSWORD || process.env.ADMIN_PASSWORD.length < 12 || !process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32)) {
+  throw new Error('Production rejimida ADMIN_PASSWORD (12+) va JWT_SECRET (32+) shart.');
+}
+
 /* ---------- Boshlang'ich ma'lumotlar ---------- */
 (function seed() {
   if (!db.prepare("SELECT 1 FROM users WHERE role='admin'").get()) {
@@ -66,7 +70,7 @@ if (!SECRET) { SECRET = crypto.randomBytes(32).toString('hex'); setSetting('jwt_
       bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'admin12345', 10), 'admin');
     console.log('Admin yaratildi:', process.env.ADMIN_EMAIL || 'admin@markaz.uz');
   }
-  if (db.prepare('SELECT COUNT(*) n FROM courses').get().n === 0) {
+  if (process.env.NODE_ENV !== 'production' && db.prepare('SELECT COUNT(*) n FROM courses').get().n === 0) {
     const t = db.prepare('INSERT INTO users(name,email,password,role) VALUES(?,?,?,?)')
       .run('Aziza Karimova', 'teacher@markaz.uz', bcrypt.hashSync('teacher123', 10), 'teacher');
     const tid = t.lastInsertRowid;
@@ -106,6 +110,7 @@ if (!SECRET) { SECRET = crypto.randomBytes(32).toString('hex'); setSetting('jwt_
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
+app.disable('x-powered-by');
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -143,7 +148,7 @@ SELECT c.*, u.name AS teacher_name,
 FROM courses c LEFT JOIN users u ON u.id=c.teacher_id`;
 
 /* realtime yordamchilar */
-const online = () => io.engine.clientsCount;
+const online = () => new Set([...io.sockets.sockets.values()].map(s => s.user ? 'user:'+s.user.id : 'visitor:'+(s.handshake.auth?.visitorId || s.id))).size;
 const broadcastCourses = () => { io.emit('courses:changed'); io.emit('stats:changed'); };
 function activity(text, teacherId) {
   const payload = { text, ts: Date.now() };
@@ -167,6 +172,7 @@ app.get('/api/stats', (req, res) => {
 });
 
 app.post('/api/auth/register', wrap((req, res) => {
+  if (limited('register:'+req.ip,12)) return bad(res,'Juda ko‘p ro‘yxatdan o‘tish urinishlari',429);
   const name = clean(req.body.name, 80), email = clean(req.body.email, 120).toLowerCase(), password = String(req.body.password || '');
   if (name.length < 2) return bad(res, 'Ismni kiriting');
   if (!/^\S+@\S+\.\S+$/.test(email)) return bad(res, "Email noto'g'ri");
@@ -181,6 +187,7 @@ app.post('/api/auth/register', wrap((req, res) => {
 
 app.post('/api/auth/login', wrap((req, res) => {
   const email = clean(req.body.email, 120).toLowerCase(), password = String(req.body.password || '');
+  if (limited('login:'+req.ip,30)) return bad(res,'Juda ko‘p urinish, birozdan so‘ng takrorlang',429);
   const u = db.prepare('SELECT * FROM users WHERE email=?').get(email);
   if (!u || !bcrypt.compareSync(password, u.password)) return bad(res, "Email yoki parol noto'g'ri", 401);
   const user = { id: u.id, name: u.name, email: u.email, role: u.role };
@@ -197,8 +204,8 @@ app.get('/api/courses/:id', auth(false), wrap((req, res) => {
   const c = db.prepare(COURSE_SQL + ' WHERE c.id=?').get(req.params.id);
   if (!c) return bad(res, 'Kurs topilmadi', 404);
   const manager = isManager(c, req.user);
-  if (!c.published && !manager) return bad(res, 'Kurs topilmadi', 404);
   const enrolled = isEnrolled(c, req.user);
+  if (!c.published && !manager && !enrolled) return bad(res, 'Kurs topilmadi', 404);
   const access = manager || enrolled;
   const done = new Set(req.user ? db.prepare('SELECT lesson_id FROM progress WHERE user_id=?').all(req.user.id).map(r => r.lesson_id) : []);
   const lessons = db.prepare('SELECT * FROM lessons WHERE course_id=? ORDER BY position,id').all(c.id).map(l => ({
@@ -217,6 +224,7 @@ app.get('/api/courses/:id', auth(false), wrap((req, res) => {
 app.post('/api/courses/:id/enroll', auth(), wrap((req, res) => {
   const c = getCourse(req.params.id);
   if (!c || !c.published) return bad(res, 'Kurs topilmadi', 404);
+  if (c.price > 0 && !isManager(c,req.user)) return bad(res, "Pullik kursga faqat tasdiqlangan to'lovdan keyin yozilishingiz mumkin", 402);
   const r = db.prepare('INSERT OR IGNORE INTO enrollments(user_id,course_id) VALUES(?,?)').run(req.user.id, c.id);
   if (r.changes) {
     activity(`${req.user.name} «${c.title}» kursiga yozildi`, c.teacher_id);
@@ -320,6 +328,7 @@ app.put('/api/courses/:id', ...staff, wrap((req, res) => {
 
 app.delete('/api/courses/:id', ...staff, wrap((req, res) => {
   const c = ownCourse(req, res); if (!c) return;
+  if (db.prepare('SELECT 1 FROM orders WHERE course_id=? LIMIT 1').get(c.id)) return bad(res, 'Bu kurs uchun to‘lovlar mavjud: moliyaviy tarixni saqlash uchun kursni qoralamaga o‘tkazing', 409);
   db.prepare('DELETE FROM courses WHERE id=?').run(c.id);
   broadcastCourses();
   res.json({ ok: true });
@@ -436,6 +445,7 @@ app.put('/api/admin/users/:id/role', ...adminOnly, wrap((req, res) => {
 
 app.delete('/api/admin/users/:id', ...adminOnly, wrap((req, res) => {
   if (Number(req.params.id) === req.user.id) return bad(res, "O'zingizni o'chira olmaysiz");
+  if (db.prepare('SELECT 1 FROM orders WHERE user_id=? LIMIT 1').get(req.params.id)) return bad(res, 'Bu foydalanuvchining to‘lov tarixi bor, uni o‘chirish mumkin emas', 409);
   db.prepare('DELETE FROM users WHERE id=?').run(req.params.id);
   broadcastCourses();
   res.json({ ok: true });
@@ -451,7 +461,7 @@ app.put('/api/settings', ...adminOnly, wrap((req, res) => {
 
 /* ---------- AI (Google Gemini) ---------- */
 async function gemini(system, messages, max = 1000) {
-  const key = process.env.GEMINI_API_KEY || process.env.ANTHROPIC_API_KEY;
+  const key = process.env.GEMINI_API_KEY;
   if (!key) { 
     const e = new Error("AI hali ulanmagan: serverda GEMINI_API_KEY o'rnatilishi kerak"); 
     e.soft = true; 
@@ -464,7 +474,7 @@ async function gemini(system, messages, max = 1000) {
     parts: [{ text: String(m.content) }]
   }));
 
-  const modelName = process.env.AI_MODEL || 'gemini-1.5-flash';
+  const modelName = process.env.AI_MODEL || 'gemini-2.5-flash';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${key}`;
 
   const response = await fetch(url, {
@@ -510,6 +520,23 @@ app.post('/api/ai', auth(false), wrap(async (req, res) => {
   try { res.json({ reply: await gemini(system, msgs) }); }
   catch (e) { if (e.soft) return res.json({ reply: e.message }); throw e; }
 }));
+/* ---------- AI test generator ---------- */
+app.post('/api/ai/generate-test', auth(), role('teacher','admin'), wrap(async (req,res) => {
+  const c=getCourse(Number(req.body.courseId));
+  if(!c || !isManager(c,req.user)) return bad(res,"Kursni boshqarish ruxsati yo'q",403);
+  const count=Math.min(10,Math.max(1,Number(req.body.count)||5));
+  const topic=clean(req.body.topic,160)||c.title;
+  const raw=await gemini('Faqat JSON qaytar: {"questions":[{"text":"...","options":["...","...","...","..."],"answer":0}]} . Har bir savol 4 variantli, bitta javob to\'g\'ri.',
+    [{role:'user',content:`${topic} mavzusida o'zbek tilida ${count} ta test tuz.`}],3500);
+  let parsed;try{parsed=JSON.parse(raw.replace(/^```(?:json)?\s*/i,'').replace(/```\s*$/,'').trim());}catch{return bad(res,'AI noto‘g‘ri format qaytardi, qayta urinib ko‘ring',502);}
+  const questions=validQuestions(parsed.questions);
+  if(!questions) return bad(res,'AI savollarini tekshirish muvaffaqiyatsiz',502);
+  res.json({questions});
+}));
+
+/* ---------- Additional features ---------- */
+require('./features')({app,io,db,auth,role,getCourse,isManager,isEnrolled,bad,clean,activity,broadcastCourses});
+
 /* ---------- Realtime ---------- */
 io.use((socket, next) => {
   const t = socket.handshake.auth && socket.handshake.auth.token;
@@ -532,6 +559,10 @@ io.on('connection', socket => {
 });
 
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
-app.use((err, req, res, next) => { console.error(err); res.status(500).json({ error: err.message || 'Server xatosi' }); });
+app.use((err, req, res, next) => { console.error(err); res.status(500).json({ error: process.env.NODE_ENV === 'production' ? 'Server xatosi' : (err.message || 'Server xatosi') }); });
 
+if (process.env.NODE_ENV === 'production' && (!process.env.ADMIN_PASSWORD || process.env.ADMIN_PASSWORD.length < 12 || !process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32)) {
+  console.error('Production ishga tushmadi: ADMIN_PASSWORD (12+) va JWT_SECRET (32+) shart.');
+  process.exit(1);
+}
 server.listen(PORT, '0.0.0.0', () => console.log(`✅ Sayt ishga tushdi: http://localhost:${PORT}`));

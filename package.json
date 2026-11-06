@@ -1,13 +1,16 @@
 {
   "name": "oquv-markaz",
-  "version": "1.0.0",
-  "description": "Zamonaviy o'quv markaz platformasi: kurslar, testlar, AI, real vaqt, admin va o'qituvchi panellari",
+  "version": "2.0.0",
+  "description": "Academy Pro: kurslar, WebRTC videodarslar, xabarlar, admin va Payme Business",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "test": "node --test tests/*.test.js"
   },
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^11.5.0",
