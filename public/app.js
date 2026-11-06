@@ -3,7 +3,7 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const money = p => (p > 0 ? String(p).replace(/\B(?=(\d{3})+(?!\d))/g, ' ') + " so'm" : 'Bepul');
-const GRAD = ['#0a84ff,#5e5ce6', '#ff375f,#ff9f0a', '#30d158,#64d2ff', '#bf5af2,#ff375f', '#64d2ff,#5e5ce6', '#ff9f0a,#ffd60a', '#32ade6,#30d158', '#5e5ce6,#bf5af2'];
+const GRAD = ['#30417c,#5676c6','#205b68,#3a9d9f','#71548c,#aa7fb9','#4e567c,#8b9ccb','#305b67,#79a2aa','#605a7f,#9690b2','#376870,#71aa98','#345080,#6a84bc'];
 const grad = id => `linear-gradient(135deg,${GRAD[id % GRAD.length]})`;
 const fmtDate = d => new Date(d.replace(' ', 'T') + 'Z').toLocaleDateString('uz-UZ', { day: '2-digit', month: 'short' });
 
@@ -96,7 +96,7 @@ function renderNav() {
 /* ---------- realtime ---------- */
 function connectSocket() {
   if (socket) socket.disconnect();
-  socket = io({ auth: { token: S.token } });
+  socket = io({ auth: { token: S.token, visitorId: sessionStorage.getItem('visitorId') || (function(){const id=(globalThis.crypto?.randomUUID?.()||('v'+Date.now()+'-'+Math.random().toString(36).slice(2)));sessionStorage.setItem('visitorId',id);return id})() } });
   socket.on('online', ({ count }) => {
     $$('[data-live="online"]').forEach(el => { if (el.textContent != count) { el.textContent = count; el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash'); } });
   });
