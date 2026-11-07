@@ -1,60 +1,83 @@
-# Academy Pro — O‘quv markazi platformasi v2
+# EduSphere Pro 8.2 — release verification package
 
-Node.js + Express + Socket.IO + SQLite + WebRTC + Payme Business Merchant API. Ko‘p sahifali premium dashboard: talabalar, o‘qituvchi va administrator; kurslar, matnli/video darslar, testlar, jonli dars xonalari, real vaqt xabarlari, shaxsiy xabarlar, bildirishnomalar va server tomonidan tasdiqlanadigan to‘lovlar.
+**Qadamlar:** `npm ci`, `npm run test:release`, then check `REAL_TEST_RESULTS.md` and `RAILWAY_FINAL_CHECKLIST.md`.
 
-## 1. Ishga tushirish (Windows / Linux / macOS)
+This release contains additional **tests** for the existing EduSphere Pro 8.1 application. It has not been deployed to Railway or fully certified. All HTTP, video signaling and load tests run with an isolated database; they are not intended for a live production server.
 
-Node.js **20 yoki 22 LTS** va npm o‘rnating. Barcha loyiha fayllarini bitta papkaga chiqaring. VS Code terminali:
+For the school center: QR attendance, Telegram bots and email password recovery are intentionally not included. Passwords are reset by authorized administrators. Tuition is entered manually by admins/accounting staff; no Click/Uzum/Payme integration is required. Light/dark modes are retained.
+
+# EduSphere Pro v8.1 — markazga topshirish uchun tekshirilgan kod to‘plami
+
+**Birinchi o‘qiladigan fayl:** [`TOPSHIRISH_OLDIDAN.md`](TOPSHIRISH_OLDIDAN.md). V8.1 tuzatishlari: [`RELEASE_NOTES.md`](RELEASE_NOTES.md).
+
+## V8 dan saqlangan modullar
+
+Bu **mavjud v7 tizimining yangilangan kodi**, Railway'dagi o‘quvchilar, guruhlar, kurslar va to‘lovlar bazasini o‘chirishni talab qilmaydi. **Hamma modul production sinovdan o‘tgan deb hisoblanmaydi** (`BUILD_STATUS.md`).
+
+## Siz so‘ragan yakuniy tartib
+
+- **QR davomat olib tashlandi:** v7 QR ekranlari va `/api/v7/attendance/qr/*` APIlari ishlatilmaydi. O‘qituvchi odatdagi davomat panelida kelgan/kelmagan/kechikkan holatlarini belgilaydi. Oldindan bazada yaratilgan QR jadvallar xavfsizlik uchun **o‘chirib yuborilmaydi**, lekin yangi kod ularga murojaat qilmaydi.
+- **Telegram bot integratsiyasi yo‘q:** monitoring botiga xabar yuborish kodi va muhit o‘zgaruvchilari olib tashlandi. Sayt ichidagi bildirishnomalar saqlanadi. Marketing uchun admin kiritgan **Telegram kontakt havolasi** saqlangan — bu bot/API integratsiyasi emas.
+- **Email orqali parol tiklash yo‘q:** `Forgot password` xizmati yo‘q va yaratilmadi. O‘quvchi/o‘qituvchi/ota-ona/buxgalter o‘z parolini mustaqil tiklay olmaydi. **Admin panel → Foydalanuvchilar → Parolni tiklash** orqali administrator o‘zgartiradi.
+- **Qo‘lda to‘lov:** admin/buxgalter qabul qilgan to‘lov summasi, sanasi, turi va izohini mavjud v5 modulga kiritadi. Click, Uzum va Payme kalitlari shart emas.
+- **Oq/qora dizayn**, kurslar, guruhlar, testlar, chat, jonli dars va boshqa v7 modullari saqlangan.
+
+## Administrator parolni qanday o‘zgartiradi?
+
+1. Admin akkauntingiz bilan saytga kiring.
+2. **Admin → Foydalanuvchilar** bo‘limini oching.
+3. Foydalanuvchi yonidagi **Parolni tiklash** tugmasini bosing.
+4. Administratorning **joriy paroli**ni, foydalanuvchining **yangi parolini (12–128 belgi)** va tasdiqni kiriting.
+5. Agar foydalanuvchi Authenticator kodini ham yo‘qotgan bo‘lsa, tegishli 2FA tiklash katagini belgilang; aks holda uni belgilamang.
+6. **Parolni almashtirish**ni bosing. Yangi parol xesh ko‘rinishida bazaga saqlanadi, oldingi JWT sessiyalar versiyasi bekor qilinadi va faol socket aloqalari uziladi. Amal audit jurnaliga yoziladi.
+
+Huquqlar: admin odatiy foydalanuvchilar parolini o‘zgartiradi, **boshqa admin parolini faqat super admin o‘zgartiradi**. Hech kim boshqa super admin parolini reset qilmaydi. Administrator o‘z parolini o‘zgartirsa, qayta kirishi kerak.
+
+Agar **asosiy adminning paroli unutilgan** bo‘lsa, saytdan kirib reset qilishning iloji yo‘q. Railway Volume backup oling va CLI'dagi `npm run admin:reset` skriptini faqat mavjud DB va to‘g‘ri `DATA_DIR` bilan ishlating. Bu bir dona admin akkaunti uchun mo‘ljallangan. `.env`dagi `ADMIN_PASSWORD`ni almashtirish **mavjud admin DB parolini o‘zi o‘zgartirmaydi**.
+
+## Ishga tushirish
+
+Node.js >=20 tavsiya etiladi:
 
 ```bash
 npm ci
-cp .env.example .env        # Windows PowerShell: Copy-Item .env.example .env
+cp .env.example .env   # Windows'da faylni qo‘lda nusxalang
 npm start
 ```
 
-Brauzer: **http://localhost:3000**. `.env` faylida kalitlarni sozlang. `npm test` testlar serverni alohida vaqtinchalik SQLite bazada ishga tushiradi.
+Brauzer: `http://localhost:3000`. Production uchun `NODE_ENV=production`, kamida 32 belgili **mavjud** `JWT_SECRET`, `ADMIN_EMAIL`, 12+ belgili `ADMIN_PASSWORD`, `DATA_DIR` va Railway Volume pathni tekshiring. `.env`, `data`, `node_modules` GitHubga joylanmasin.
 
-**Faqat development rejimidagi dastlabki namuna hisoblar** (birinchi marta bo‘sh bazada): `admin@markaz.uz / admin12345` va `teacher@markaz.uz / teacher123`. Production rejimida namuna kurslar/teacher hisob yaratilmaydi. Admin uchun `ADMIN_EMAIL` va kuchli `ADMIN_PASSWORD` ni *birinchi ishga tushirishdan oldin* sozlang. **Production** majburiy: `NODE_ENV=production`, `JWT_SECRET` kamida 32 belgi va `ADMIN_PASSWORD` kamida 12 belgi; yangi, bo‘sh baza yoki tozalangan test akkauntlardan foydalaning.
-
-## 2. Haqiqiy Payme to‘lovlari (demo emas)
-
-Payme Business bilan merchant shartnomasi va **Merchant API** veb-kassasi talab etiladi.
-
-1. Payme Business da billing/kassa yarating va **merchant ID** hamda **secret key** oling.
-2. Payme kassa `account` maydoni nomini **`order_id`** qilib sozlang.
-3. Tashqi HTTPS billing endpointini **`https://YOUR-DOMAIN/api/payments/payme`** qilib o‘rnating.
-4. `.env` ichida `PAYME_MERCHANT_ID`, `PAYME_MERCHANT_KEY`, `PUBLIC_URL` ni sozlang, serverni qayta ishga tushiring. Kalitlar serverda qoladi.
-5. Platforma buyurtma yaratadi, foydalanuvchini `checkout.paycom.uz` ga yo‘naltiradi. **To‘lov tasdiqlangani faqat Payme serveri `PerformTransaction` yuborganida va uning BasicAuth tekshiruvi muvaffaqiyatli bo‘lganda** qayd etiladi. Qaytish/redirect hech qachon kursga avtomatik kirish bermaydi.
-6. Merchant APIda `CheckPerformTransaction`, `CreateTransaction`, `PerformTransaction`, `CancelTransaction`, `CheckTransaction` va `GetStatement` endpointlari mavjud. To‘lov summalari Payme uchun **tiyin**ga aylantiriladi. Bir xil so‘rov qayta kelsa ikki marta enroll qilinmaydi.
-
-**Eslatma:** Real pul qabul qilishni faollashtirish uchun haqiqiy merchant hisob va production key kerak. Kalitlar berilmasa, to‘lov tugmasi xavfsiz tarzda **503 — merchant sozlanmagan** javobini qaytaradi, pullik kursni tekinga ochmaydi. Soliq/fiskal cheklar, qaytarish siyosati, provayder sertifikatsiyasi va shartnoma tekshiruvlarini o‘zingizning biznes jarayoningizga moslashtiring. To‘lov provayderining sandbox sinovlaridan o‘ting.
-
-## 3. Zoomga o‘xshash jonli videodarslar
-
-O‘qituvchi kursga bog‘langan darsni rejalaydi, boshlaydi va yakunlaydi. Kursga yozilgan talabalar va mas’ul o‘qituvchi videoxonaga kirishi mumkin. Kamera/mikrofonni yoqish-o‘chirish, ekran ulashish, real vaqtli video/audio, kurs chatlari bor. Socket.IO faqat ruxsatli ishtirokchilar uchun **WebRTC signaling**ni uzatadi.
-
-**Texnik cheklov:** Bu to‘liq Zoom infratuzilmasi yoki katta konferensiya serveri emas. WebRTC P2P mesh **8 ishtirokchigacha** cheklangan. Mahalliy `localhost` yoki haqiqiy HTTPS manzilda kamera ishlaydi; mobil tarmoqlar va NAT ortida ishonchli ishlashi uchun `.env` ga **TURN server** (`TURN_URL`, `TURN_USERNAME`, `TURN_PASSWORD`) qo‘shing. 20–100+ qatnashchi, video yozuv va sifatli ko‘p foydalanuvchili konferensiya uchun alohida SFU (LiveKit/Jitsi/mediasoup) kerak bo‘ladi. Ekran ulashish brauzer ruxsatiga bog‘liq.
-
-## 4. Xabarlar, statistika, admin
-
-- Onlayn hisoblagich Socket.IO dagi noyob avtorizatsiyalangan foydalanuvchilar va mehmon sessiyalarini sanaydi (har bir ochiq brauzer tabiiy ravishda bitta mehmon seansi).
-- Kurs guruh chatlari faqat shu kurs a'zolariga ochiq. Shaxsiy chatlar adminlar yoki bir kursga aloqador talabalar/o‘qituvchilar orasida ishlaydi. Xabarlar va bildirishnomalar SQLite da saqlanadi.
-- Admin panelda kurslar, rollar, yangi akkauntlar, real to‘lov holatlari, foydalanuvchilar va rejalashtirilgan videodarslarni ko‘rish/boshqarish bor. Daromad sonlari faqat server tasdiqlagan `paid` buyurtmalardan hisoblanadi.
-- Mavjud test topshirish, dars progressi, AI yordamchi va kurslarni boshqarish imkoniyatlari saqlangan. `GEMINI_API_KEY` berilsa AI test generatori ishlaydi, kalitsiz foydalanilganda foydalanuvchiga ochiq xabar qaytadi.
-
-## 5. Railway deploy
-
-GitHubga yuklashdan oldin `.env` va `data/` gitga qo‘shilmaganini tekshiring. Railway → New Project → Deploy from GitHub. Variablesga `NODE_ENV=production`, `JWT_SECRET`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `PAYME_MERCHANT_ID`, `PAYME_MERCHANT_KEY`, `PUBLIC_URL` va zarur TURN/Gemini kalitlarini qo‘ying. Railway Volume ulab **`DATA_DIR=/data`** sozlang. HTTPS domenni yoqing. Database backup va monitoringni alohida sozlang. Bir serverli SQLite + Socket.IO tuzilmasi ko‘p serverli gorizontal masshtablash uchun mos emas; scale qilish uchun PostgreSQL va Redis adapter talab qilinadi.
-
-## 6. Testlar va cheklovlar
+## Tekshiruv
 
 ```bash
-npm ci
+npm run test:schema
+npm run test:static
+npm run test:credentials
 npm test
 ```
 
-Testlar pullik kursga to‘lovsiz kirib bo‘lmasligi, Payme noto‘g‘ri kalitni rad etishi, tranzaksiya qayta kelsa idempotent javob qaytarishi, tasdiqlangan to‘lovdan keyin kurs ochilishi, xabarlar saqlanishi va jonli dars APIlarini tekshiradi. Real Payme sandbox/production pul aylanishi, WebRTC ning ikki haqiqiy qurilma bilan ishlashi va brauzer interfeysini **alohida tekshirish shart**. 100% xatosizlik kafolati emas.
+`test:schema` va `test:static` Node/Python utilitalari bilan ishlaydi. `test:credentials` administrator parolini tiklashdagi ruxsatlar, audit, sessiya versiyasi va rad etish holatlarini izolyatsiyalangan testda tekshiradi. `npm test` esa **haqiqiy HTTP integratsion testlarni** bajarish uchun `npm ci` va serverni ishga tushiruvchi paketlar talab qiladi.
 
-## Muhim xavfsizlik tavsiyalari
+## Railway — asosiy saytni buzmaslik
 
-`.env`ni hech kimga yubormang, maxfiy keylarni repositoriyga joylamang. Production ishga tushirishdan oldin domen HTTPS, Payme sandbox, TURN, to‘lovlar boʻyicha reconciliation, email tasdiqlash / parol tiklash, trafikni cheklash, zaxira nusxalar, jurnal/audit, asosiy administrator akkaunti uchun MFA va security auditni bajaring. Bu loyiha MVP bo‘lib, tijoriy muhitga chiqarishda qo‘shimcha operatsion nazorat talab etiladi.
+1. Oldingi `markaz` GitHub branch va Railway xizmatining Source bog‘lanishini aniqlang.
+2. **Railway Volume /data bazasidan backup yarating.** Ma’lumotlar saqlanayotgan mount pathga mos `DATA_DIR`ni saqlang.
+3. V8 ni avval alohida staging servis/ma’lumotlar bazasi nusxasiga deploy qiling.
+4. Admin login → foydalanuvchilar ro‘yxati → parolni reset → eskisi bilan login 401 → yangisi bilan login 200; qo‘lda to‘lov va davomatni tekshiring.
+5. Testlar va zaxira tayyor bo‘lsa, eski repository kodini v8 bilan yangilang va Railway Deploy Logs'ni tekshiring.
+
+**Qayd:** QR va Telegram bot tizimi UI/API kodidan olib tashlandi; eski DB jadvallari tarixiy yaxlitlik uchun saqlanadi. 
+
+## V8.1 tekshiruv buyruqlari
+
+```bash
+npm ci
+npm run test:static
+npm run test:schema
+npm test
+npm start
+# boshqa terminalda (yoki staging server BASE_URL bilan):
+npm run smoke:http
+```
+
+`npm test` HTTP integratsion testlarini ishga tushiradi; buning uchun `npm ci` va internet kerak.

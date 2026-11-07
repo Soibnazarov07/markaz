@@ -49,6 +49,8 @@ CREATE TABLE IF NOT EXISTS results(
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 `);
 
+// Additive session revocation: old JWTs stay valid until a password change.
+if(!db.pragma('table_info(users)').some(c=>c.name==='session_version'))db.exec('ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0');
 const getSetting = (k, d = '') => { const r = db.prepare('SELECT value FROM settings WHERE key=?').get(k); return r ? r.value : d; };
 const setSetting = (k, v) => db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k, v);
 
@@ -111,6 +113,14 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 app.disable('x-powered-by');
+app.use((req,res,next)=>{
+  res.setHeader('X-Content-Type-Options','nosniff');
+  res.setHeader('X-Frame-Options','DENY');
+  res.setHeader('Referrer-Policy','strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy','geolocation=(),payment=()');
+  if(req.path.startsWith('/api/')&&!req.path.startsWith('/api/public/'))res.setHeader('Cache-Control','no-store');
+  next();
+});
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -126,18 +136,18 @@ function auth(required = true) {
       try {
         const p = jwt.verify(t, SECRET);
         const u = db.prepare('SELECT id,name,email,role FROM users WHERE id=?').get(p.id);
-        if (u) req.user = u;
+        if (u && Number(p.sv ?? 0) === Number(db.prepare('SELECT session_version FROM users WHERE id=?').get(u.id).session_version)) req.user = u;
       } catch { /* yaroqsiz token */ }
     }
     if (required && !req.user) return bad(res, 'Avval tizimga kiring', 401);
     next();
   };
 }
-const role = (...r) => (req, res, next) => (r.includes(req.user.role) ? next() : bad(res, "Ruxsat yo'q", 403));
-const sign = u => jwt.sign({ id: u.id }, SECRET, { expiresIn: '30d' });
+const role = (...r) => (req, res, next) => (r.includes(req.user.role) || (req.user.role === 'super_admin' && r.includes('admin')) ? next() : bad(res, "Ruxsat yo'q", 403));
+const sign = u => jwt.sign({ id: u.id, sv: db.prepare('SELECT session_version FROM users WHERE id=?').get(u.id).session_version }, SECRET, { expiresIn: '30d' });
 
 const getCourse = id => db.prepare('SELECT * FROM courses WHERE id=?').get(id);
-const isManager = (c, u) => !!u && (u.role === 'admin' || (u.role === 'teacher' && c.teacher_id === u.id));
+const isManager = (c, u) => !!u && (['admin','super_admin'].includes(u.role) || (u.role === 'teacher' && c.teacher_id === u.id));
 const isEnrolled = (c, u) => !!u && !!db.prepare('SELECT 1 FROM enrollments WHERE user_id=? AND course_id=?').get(u.id, c.id);
 
 const COURSE_SQL = `
@@ -176,7 +186,7 @@ app.post('/api/auth/register', wrap((req, res) => {
   const name = clean(req.body.name, 80), email = clean(req.body.email, 120).toLowerCase(), password = String(req.body.password || '');
   if (name.length < 2) return bad(res, 'Ismni kiriting');
   if (!/^\S+@\S+\.\S+$/.test(email)) return bad(res, "Email noto'g'ri");
-  if (password.length < 6) return bad(res, "Parol kamida 6 ta belgi bo'lsin");
+  if (password.length < 12 || password.length > 128) return bad(res, "Parol 12–128 ta belgidan iborat bo‘lsin");
   if (db.prepare('SELECT 1 FROM users WHERE email=?').get(email)) return bad(res, "Bu email band");
   const id = db.prepare('INSERT INTO users(name,email,password,role) VALUES(?,?,?,?)').run(name, email, bcrypt.hashSync(password, 10), 'student').lastInsertRowid;
   const user = db.prepare('SELECT id,name,email,role FROM users WHERE id=?').get(id);
@@ -185,11 +195,13 @@ app.post('/api/auth/register', wrap((req, res) => {
   res.json({ token: sign(user), user });
 }));
 
+let mfa;
 app.post('/api/auth/login', wrap((req, res) => {
   const email = clean(req.body.email, 120).toLowerCase(), password = String(req.body.password || '');
   if (limited('login:'+req.ip,30)) return bad(res,'Juda ko‘p urinish, birozdan so‘ng takrorlang',429);
   const u = db.prepare('SELECT * FROM users WHERE email=?').get(email);
   if (!u || !bcrypt.compareSync(password, u.password)) return bad(res, "Email yoki parol noto'g'ri", 401);
+  if (mfa && !mfa.verifyLogin(u.id, req.body.totp).ok) return bad(res, 'MFA kodi talab qilinadi yoki noto‘g‘ri',401);
   const user = { id: u.id, name: u.name, email: u.email, role: u.role };
   res.json({ token: sign(user), user });
 }));
@@ -282,8 +294,8 @@ app.post('/api/tests/:id/submit', auth(), wrap((req, res) => {
 const staff = [auth(), role('teacher', 'admin')];
 
 app.get('/api/manage/courses', ...staff, (req, res) => {
-  const sql = COURSE_SQL + (req.user.role === 'admin' ? '' : ' WHERE c.teacher_id=?') + ' ORDER BY c.id DESC';
-  res.json(req.user.role === 'admin' ? db.prepare(sql).all() : db.prepare(sql).all(req.user.id));
+  const sql = COURSE_SQL + (['admin','super_admin'].includes(req.user.role) ? '' : ' WHERE c.teacher_id=?') + ' ORDER BY c.id DESC';
+  res.json(['admin','super_admin'].includes(req.user.role) ? db.prepare(sql).all() : db.prepare(sql).all(req.user.id));
 });
 
 function courseFields(b, old = {}) {
@@ -425,8 +437,9 @@ app.get('/api/admin/users', ...adminOnly, (req, res) => {
 
 app.post('/api/admin/users', ...adminOnly, wrap((req, res) => {
   const name = clean(req.body.name, 80), email = clean(req.body.email, 120).toLowerCase(), password = String(req.body.password || '');
-  const r = ['student', 'teacher', 'admin'].includes(req.body.role) ? req.body.role : 'student';
-  if (name.length < 2 || !/^\S+@\S+\.\S+$/.test(email) || password.length < 6) return bad(res, "Ism, to'g'ri email va kamida 6 belgili parol kerak");
+  const r = ['student', 'teacher', 'admin','parent','accountant','branch_manager'].includes(req.body.role) ? req.body.role : 'student';
+  if (r === 'admin' && req.user.role !== 'super_admin') return bad(res, 'Yangi administratorni faqat super admin yaratishi mumkin', 403);
+  if (name.length < 2 || !/^\S+@\S+\.\S+$/.test(email) || password.length < 12 || password.length > 128) return bad(res, "Ism, to'g'ri email va 12–128 belgili parol kerak");
   if (db.prepare('SELECT 1 FROM users WHERE email=?').get(email)) return bad(res, 'Bu email band');
   db.prepare('INSERT INTO users(name,email,password,role) VALUES(?,?,?,?)').run(name, email, bcrypt.hashSync(password, 10), r);
   io.emit('stats:changed');
@@ -435,17 +448,24 @@ app.post('/api/admin/users', ...adminOnly, wrap((req, res) => {
 
 app.put('/api/admin/users/:id/role', ...adminOnly, wrap((req, res) => {
   const r = req.body.role;
-  if (!['student', 'teacher', 'admin'].includes(r)) return bad(res, 'Noto\'g\'ri rol');
+  if (!['student', 'teacher', 'admin','parent','accountant','branch_manager'].includes(r)) return bad(res, 'Noto\'g\'ri rol');
+  const targetRole=db.prepare('SELECT role FROM users WHERE id=?').get(req.params.id)?.role;
+  if ((r==='admin' || targetRole==='admin') && req.user.role !== 'super_admin') return bad(res, 'Administrator rolini faqat super admin boshqaradi',403);
   if (Number(req.params.id) === req.user.id) return bad(res, "O'z rolingizni o'zgartira olmaysiz");
-  db.prepare('UPDATE users SET role=? WHERE id=?').run(r, req.params.id);
+  if (db.prepare('SELECT role FROM users WHERE id=?').get(req.params.id)?.role === 'super_admin') return bad(res, 'Super admin rolini o‘zgartirib bo‘lmaydi',403);
+  db.prepare('UPDATE users SET role=?,session_version=session_version+1 WHERE id=?').run(r, req.params.id);
   io.emit('stats:changed');
-  io.to('user:' + req.params.id).emit('role:changed');
+  io.to('user:' + req.params.id).emit('security:session-revoked');
+  io.in('user:' + req.params.id).disconnectSockets(true);
   res.json({ ok: true });
 }));
 
 app.delete('/api/admin/users/:id', ...adminOnly, wrap((req, res) => {
   if (Number(req.params.id) === req.user.id) return bad(res, "O'zingizni o'chira olmaysiz");
-  if (db.prepare('SELECT 1 FROM orders WHERE user_id=? LIMIT 1').get(req.params.id)) return bad(res, 'Bu foydalanuvchining to‘lov tarixi bor, uni o‘chirish mumkin emas', 409);
+  if (db.prepare('SELECT role FROM users WHERE id=?').get(req.params.id)?.role === 'super_admin') return bad(res, 'Super admin o‘chirilmaydi',403);
+  if (db.prepare('SELECT 1 FROM orders WHERE user_id=? LIMIT 1').get(req.params.id) || db.prepare('SELECT 1 FROM ops_invoices WHERE student_id=? LIMIT 1').get(req.params.id)) return bad(res, 'Bu foydalanuvchining to‘lov tarixi bor, uni o‘chirish mumkin emas', 409);
+  io.to('user:' + req.params.id).emit('security:session-revoked');
+  io.in('user:' + req.params.id).disconnectSockets(true);
   db.prepare('DELETE FROM users WHERE id=?').run(req.params.id);
   broadcastCourses();
   res.json({ ok: true });
@@ -534,8 +554,23 @@ app.post('/api/ai/generate-test', auth(), role('teacher','admin'), wrap(async (r
   res.json({questions});
 }));
 
+
 /* ---------- Additional features ---------- */
 require('./features')({app,io,db,auth,role,getCourse,isManager,isEnrolled,bad,clean,activity,broadcastCourses});
+
+
+/* Incremental production CMS, CRM, group & attendance modules. */
+require('./cms')({app,db,io,auth,role,getSetting,setSetting,clean,DATA_DIR});
+require('./public-quizzes')({app,db,io,auth,role});
+require('./operations')({app,db,io,auth,role});
+require('./manual-finance')({app,db,io,auth,role});
+require('./academy-extensions')({app,db,io,auth,role});
+require('./exams-v5')({app,db,io,auth,role});
+require('./v6-core')({app,db,io,auth,role,DATA_DIR});
+require('./v6-extras')({app,db,io,auth,role});
+mfa=require('./v6-mfa')({app,db,auth,SECRET});
+require('./v7-improvements')({app,db,io,auth,role});
+require('./admin-credentials')({app,db,io,auth,role});
 
 /* ---------- Realtime ---------- */
 io.use((socket, next) => {
@@ -544,7 +579,7 @@ io.use((socket, next) => {
     try {
       const p = jwt.verify(t, SECRET);
       const u = db.prepare('SELECT id,name,role FROM users WHERE id=?').get(p.id);
-      if (u) socket.user = u;
+      if (u && Number(p.sv ?? 0) === Number(db.prepare('SELECT session_version FROM users WHERE id=?').get(u.id).session_version)) socket.user = u;
     } catch { /* mehmon */ }
   }
   next();
@@ -552,12 +587,14 @@ io.use((socket, next) => {
 io.on('connection', socket => {
   if (socket.user) {
     socket.join('user:' + socket.user.id);
-    if (socket.user.role === 'admin') socket.join('admins');
+    if (['admin','super_admin'].includes(socket.user.role)) socket.join('admins');
   }
   io.emit('online', { count: online() });
   socket.on('disconnect', () => setTimeout(() => io.emit('online', { count: online() }), 100));
 });
 
+// Unknown API requests are JSON 404, not a false-positive HTML success page.
+app.use('/api', (_req, res) => res.status(404).json({error:'API manzili topilmadi'}));
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 app.use((err, req, res, next) => { console.error(err); res.status(500).json({ error: process.env.NODE_ENV === 'production' ? 'Server xatosi' : (err.message || 'Server xatosi') }); });
 

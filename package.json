@@ -1,12 +1,28 @@
 {
   "name": "oquv-markaz",
-  "version": "2.0.0",
-  "description": "Academy Pro: kurslar, WebRTC videodarslar, xabarlar, admin va Payme Business",
+  "version": "8.2.0",
+  "description": "EduSphere Pro 8.2: isolated HTTP E2E, role authorization, WebRTC signaling and local load gate for Railway staging",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node --test tests/*.test.js"
+    "test": "node --test tests/*.test.js",
+    "admin:reset": "node scripts/reset-admin.js",
+    "test:static": "node --test tests/operations-ui-static.test.js tests/v5-ui-static.test.js tests/v6-ui-static.test.js tests/v7-utils.test.js tests/v7-static.test.js tests/admin-credentials-unit.test.js tests/release-regression.test.js",
+    "test:schema": "python scripts/validate-v7-schema.py",
+    "superadmin:create": "node scripts/create-superadmin.js",
+    "db:backup": "node scripts/backup-db.js",
+    "db:backup:rotate": "node scripts/backup-retention.js",
+    "monitor:check": "node scripts/monitor-health.js",
+    "test:credentials": "node --test tests/admin-credentials-unit.test.js",
+    "smoke:http": "node scripts/smoke-http.js",
+    "test:load": "node scripts/load-check.js",
+    "test:integration": "node --test tests/integration.test.js tests/roles-http.test.js tests/rtc-signaling.test.js tests/load-http.test.js tests/persistence-http.test.js",
+    "test:rtc": "node --test tests/rtc-signaling.test.js",
+    "test:roles": "node --test tests/roles-http.test.js",
+    "test:load:local": "node --test tests/load-http.test.js",
+    "test:release": "npm run test:static && npm run test:schema && npm run test:integration",
+    "test:persistence": "node --test tests/persistence-http.test.js"
   },
   "engines": {
     "node": ">=18"

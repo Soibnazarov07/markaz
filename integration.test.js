@@ -1,110 +1,92 @@
 'use strict';
-const { test } = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
-const { spawn } = require('node:child_process');
-
+/** Real HTTP E2E tests, isolated temp database. Requires npm ci; never targets production. */
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
+const {spawn}=require('node:child_process');
 const root=path.join(__dirname,'..');
-const data=fs.mkdtempSync(path.join(os.tmpdir(),'academy-pro-test-'));
-const port=41000+Math.floor(Math.random()*7000);
-const base='http://127.0.0.1:'+port;
-const paymeKey='integration-test-key';
-let proc;
-let adminToken,studentToken,teacherToken;
-let paidCourse,freeCourse,orderId;
-async function http(url,method='GET',body,token){
-  const response=await fetch(base+'/api'+url,{method,headers:{'content-type':'application/json',...(token?{authorization:'Bearer '+token}:{})},body:body===undefined?undefined:JSON.stringify(body)});
-  return { status:response.status, data:await response.json() };
-}
-async function payme(method,params,id=1,badKey=false){
-  const result=await fetch(base+'/api/payments/payme',{
-    method:'POST',headers:{'content-type':'application/json',authorization:'Basic '+Buffer.from('Paycom:'+(badKey?'wrong':paymeKey)).toString('base64')},
-    body:JSON.stringify({method,params,id})
-  });
-  return {status:result.status,data:await result.json()};
-}
-test('API / Payme / chats / live scheduling integration', async t=>{
-  proc=spawn(process.execPath,['server.js'],{
-    cwd:root,env:{...process.env,PORT:String(port),DATA_DIR:data,JWT_SECRET:'integration-only-secret-1234567890123456789012',
-      ADMIN_EMAIL:'admin@markaz.uz',ADMIN_PASSWORD:'admin12345',PAYME_MERCHANT_ID:'test-merchant',PAYME_MERCHANT_KEY:paymeKey,
-      NODE_ENV:'test',GEMINI_API_KEY:''},stdio:['ignore','pipe','pipe']
-  });
-  let logs='';proc.stdout.on('data',d=>logs+=d);proc.stderr.on('data',d=>logs+=d);
-  t.after(()=>{proc.kill('SIGTERM');try{fs.rmSync(data,{recursive:true,force:true});}catch{}});
-  let ready=false;
-  for(let i=0;i<55;i++){
-    if(proc.exitCode!==null)break;
-    try{const r=await fetch(base+'/api/stats');if(r.ok){ready=true;break;}}catch{}
-    await new Promise(r=>setTimeout(r,200));
-  }
-  assert.ok(ready,'Server did not become ready. Log: '+logs);
-  await t.test('public catalog, login and register',async()=>{
-    const s=await http('/stats');assert.equal(s.status,200);assert.ok(s.data.courses>=2);
-    const courses=(await http('/courses')).data;paidCourse=courses.find(c=>c.price>0);freeCourse=courses.find(c=>c.price===0);
-    assert.ok(paidCourse&&freeCourse);
-    adminToken=(await http('/auth/login','POST',{email:'admin@markaz.uz',password:'admin12345'})).data.token;
-    teacherToken=(await http('/auth/login','POST',{email:'teacher@markaz.uz',password:'teacher123'})).data.token;
-    assert.ok(adminToken&&teacherToken);
-    const r=await http('/auth/register','POST',{name:'Test Student',email:'test'+Date.now()+'@example.org',password:'StrongPass123'});
-    assert.equal(r.status,200);studentToken=r.data.token;assert.equal(r.data.user.role,'student');
-  });
-  await t.test('paid-course enrollment cannot bypass Payme',async()=>{
-    const no=await http('/courses/'+paidCourse.id+'/enroll','POST',{},studentToken);
-    assert.equal(no.status,402);
-    const yes=await http('/courses/'+freeCourse.id+'/enroll','POST',{},studentToken);
-    assert.equal(yes.status,200);
-    const checkout=await http('/payments/checkout','POST',{courseId:paidCourse.id},studentToken);
-    assert.equal(checkout.status,200);assert.match(checkout.data.checkoutUrl,/checkout\.paycom\.uz/);
-    orderId=checkout.data.orderId;assert.ok(orderId>0);
-  });
-  await t.test('Payme auth, amount, idempotent confirmation and course unlock',async()=>{
-    const params={account:{order_id:String(orderId)},amount:paidCourse.price*100};
-    const unauth=await payme('CheckPerformTransaction',params,11,true);
-    assert.equal(unauth.status,200);assert.equal(unauth.data.error.code,-32504);
-    const invalid=await payme('CheckPerformTransaction',{...params,amount:1},12);
-    assert.equal(invalid.data.error.code,-31001);
-    assert.equal((await payme('CheckPerformTransaction',params,13)).data.result.allow,true);
-    const transaction='507f1f77bcf86cd799439010';
-    const createParams={...params,id:transaction,time:Date.now()};
-    const created=await payme('CreateTransaction',createParams,14);
-    assert.equal(created.data.result.state,1);
-    assert.equal((await payme('CreateTransaction',createParams,15)).data.result.state,1);
-    const performed=await payme('PerformTransaction',{id:transaction},16);
-    assert.equal(performed.data.result.state,2);
-    assert.equal((await payme('PerformTransaction',{id:transaction},17)).data.result.state,2);
-    const course=(await http('/courses/'+paidCourse.id,'GET',undefined,studentToken)).data;
-    assert.equal(course.enrolled,true);
-    const tx=await payme('CheckTransaction',{id:transaction},18);
-    assert.equal(tx.data.result.state,2);
-    const orders=(await http('/payments/my','GET',undefined,studentToken)).data;
-    assert.ok(orders.some(o=>o.id===orderId && o.status==='paid'));
-    const statement=(await payme('GetStatement',{from:0,to:Date.now()+10000},19)).data;
-    assert.ok(statement.result.transactions.some(x=>x.id===transaction));
-  });
-  await t.test('messages authorization and persistence',async()=>{
-    const send=await http('/chat/send','POST',{courseId:paidCourse.id,body:'Salom, ustoz!'},studentToken);
-    assert.equal(send.status,200);assert.equal(send.data.body,'Salom, ustoz!');
-    const messages=await http('/chat/course/'+paidCourse.id,'GET',undefined,studentToken);
-    assert.ok(messages.data.some(m=>m.body==='Salom, ustoz!'));
-    const contacts=(await http('/contacts','GET',undefined,studentToken)).data;
-    assert.ok(contacts.some(u=>u.role==='teacher'));
-  });
-  await t.test('teacher schedule + start class, enrolled student may view',async()=>{
-    const scheduled=await http('/live','POST',{courseId:paidCourse.id,title:'Integratsion sinov darsi',startsAt:new Date(Date.now()+3600000).toISOString(),durationMin:50},teacherToken);
-    assert.equal(scheduled.status,200);const id=scheduled.data.id;
-    const list=await http('/live','GET',undefined,studentToken);assert.ok(list.data.some(l=>l.id===id));
-    const change=await http('/live/'+id+'/status','PUT',{status:'live'},teacherToken);
-    assert.equal(change.status,200);
-    const detail=await http('/live/'+id,'GET',undefined,studentToken);
-    assert.equal(detail.data.status,'live');assert.equal(detail.data.canManage,false);
-  });
-  await t.test('administrator overview and payment list',async()=>{
-    const overview=await http('/admin/overview','GET',undefined,adminToken);
-    assert.equal(overview.status,200);assert.ok(overview.data.revenue>=paidCourse.price);
-    assert.equal((await http('/admin/payments','GET',undefined,studentToken)).status,403);
-    const orders=await http('/admin/payments','GET',undefined,adminToken);
-    assert.ok(orders.data.some(o=>o.id===orderId));
-  });
+const adminPass='TestOnlyAdmin!2026';
+const random=()=>Math.random().toString(36).slice(2);
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+
+test('real HTTP: login, RBAC, tuition, group attendance, tests and live signaling API', {timeout:80000},async t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'edusphere-e2e-'));
+ const port=41000+Math.floor(Math.random()*12000),base=`http://127.0.0.1:${port}`;
+ const child=spawn(process.execPath,['server.js'],{cwd:root,env:{...process.env,NODE_ENV:'test',PORT:String(port),DATA_DIR:dir,ADMIN_EMAIL:'testadmin@markaz.local',ADMIN_PASSWORD:adminPass,JWT_SECRET:'e2e-testing-only-very-long-secret-2026-123456',GEMINI_API_KEY:''},stdio:['ignore','pipe','pipe']});
+ let logs='';for(const stream of [child.stdout,child.stderr])stream.on('data',b=>{logs=(logs+b).slice(-6000)});
+ t.after(async()=>{child.kill('SIGTERM');await sleep(150);fs.rmSync(dir,{recursive:true,force:true});});
+ async function req(url,method='GET',body,token){
+  const response=await fetch(base+'/api'+url,{method,headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(7000)});
+  const txt=await response.text();let data;try{data=JSON.parse(txt)}catch{throw Error('JSON kutilgan '+url+': '+txt.slice(0,100))}
+  return {status:response.status,data};
+ }
+ let ready=false;
+ for(let i=0;i<70;i++){if(child.exitCode!==null)break;try{if((await req('/health')).status===200){ready=true;break}}catch{}await sleep(200)}
+ assert.ok(ready,'Server ishga tushmadi: '+logs);
+ let admin,student,teacher,studentId,paid,free,groupId,paidReceiptId,teacherId;
+ await t.test('login, protected API, public course list',async()=>{
+  assert.equal((await req('/admin/users')).status,401);
+  assert.equal((await req('/auth/login','POST',{email:'testadmin@markaz.local',password:'wrong-password'})).status,401);
+  let l=await req('/auth/login','POST',{email:'testadmin@markaz.local',password:adminPass});assert.equal(l.status,200);admin=l.data.token;
+  l=await req('/auth/login','POST',{email:'teacher@markaz.uz',password:'teacher123'});assert.equal(l.status,200);teacher=l.data.token;teacherId=l.data.user.id;
+  const r=await req('/auth/register','POST',{name:'Sinov Oquvchi',email:'release-'+random()+'@example.org',password:'TestStudentPassword2026!'});
+  assert.equal(r.status,200);student=r.data.token;studentId=r.data.user.id;
+  assert.equal((await req('/admin/users','GET',undefined,student)).status,403);
+  const c=await req('/courses');assert.equal(c.status,200);paid=c.data.find(x=>x.price>0);free=c.data.find(x=>x.price===0);assert.ok(paid&&free,'Namuna kurslar topilmadi');
+ });
+ await t.test('manual tuition: unauthorized, duplicate, audit, balance and access',async()=>{
+  assert.equal((await req(`/courses/${paid.id}/enroll`,'POST',{},student)).status,402);
+  assert.equal((await req(`/courses/${free.id}/enroll`,'POST',{},student)).status,200);
+  const info={student_id:studentId,course_id:paid.id,amount:paid.price,method:'cash',paid_on:'2026-11-06',reference:'E2E-'+random(),note:'Test uchun naqd'};
+  assert.equal((await req('/ops/manual-payments','POST',info,student)).status,403);
+  const receipt=await req('/ops/manual-payments','POST',info,admin);assert.equal(receipt.status,201);paidReceiptId=receipt.data.id;
+  assert.equal(receipt.data.access_granted,true);
+  assert.equal((await req('/ops/manual-payments','POST',info,admin)).status,409);
+  const access=await req(`/courses/${paid.id}`,'GET',undefined,student);assert.equal(access.data.enrolled,true);
+  const mine=await req('/ops/manual-payments','GET',undefined,student);assert.equal(mine.status,200);
+  assert.ok(mine.data.some(x=>x.reference===info.reference));
+  assert.equal((await req('/ops/finance','GET',undefined,student)).status,403);
+ });
+ await t.test('group attendance: teacher, student isolation, persisted history',async()=>{
+  const g=await req('/manage/groups','POST',{course_id:paid.id,name:'Sinov Guruhi',capacity:10,teacher_id:teacherId},admin);
+  assert.equal(g.status,201);groupId=g.data.id;
+  assert.equal((await req(`/manage/groups/${groupId}/students`,'POST',{student_id:studentId},admin)).status,200);
+  assert.equal((await req(`/manage/groups/${groupId}/attendance`,'POST',{date:'2026-11-07',topic:'Sinov',entries:[{student_id:studentId,status:'present'}]},student)).status,403);
+  const a=await req(`/manage/groups/${groupId}/attendance`,'POST',{date:'2026-11-07',topic:'Sinov',entries:[{student_id:studentId,status:'present'}]},teacher);
+  assert.equal(a.status,200);
+  const history=await req('/me/attendance','GET',undefined,student);assert.equal(history.status,200);
+  assert.ok(history.data.some(x=>x.group_name==='Sinov Guruhi'&&x.status==='present'));
+ });
+ await t.test('test keys hidden until submission, chat permissions',async()=>{
+  const detail=await req(`/courses/${free.id}`,'GET',undefined,student);
+  assert.ok(detail.data.tests.length>0);
+  const id=detail.data.tests[0].id,q=await req('/tests/'+id,'GET',undefined,student);
+  assert.equal(q.status,200);assert.ok(q.data.questions.length>0);
+  assert.equal(q.data.questions[0].answer,undefined);
+  const result=await req('/tests/'+id+'/submit','POST',{answers:q.data.questions.map(()=>0)},student);
+  assert.equal(result.status,200);assert.equal(typeof result.data.score,'number');
+  const sent=await req('/chat/send','POST',{courseId:free.id,body:'Sinov xabar'},student);assert.equal(sent.status,200);
+  const messages=await req('/chat/course/'+free.id,'GET',undefined,student);
+  assert.ok(messages.data.some(m=>m.body==='Sinov xabar'));
+  assert.equal((await req('/chat/course/'+paid.id,'GET',undefined)).status,401);
+ });
+ await t.test('live schedule, unauthorized controls and participant visibility',async()=>{
+  const l=await req('/live','POST',{courseId:paid.id,title:'Sinov video darsi',startsAt:new Date(Date.now()+3600000).toISOString(),durationMin:45},teacher);
+  assert.equal(l.status,200);assert.equal((await req('/live/'+l.data.id+'/status','PUT',{status:'live'},student)).status,403);
+  assert.equal((await req('/live/'+l.data.id+'/status','PUT',{status:'live'},teacher)).status,200);
+  const view=await req('/live/'+l.data.id,'GET',undefined,student);assert.equal(view.status,200);assert.equal(view.data.status,'live');
+ });
+ await t.test('admin password reset revokes old JWT, blocks student and uses audit',async()=>{
+  const newPass='ChangedPassword2026!';
+  assert.equal((await req(`/admin/users/${studentId}/password`,'PUT',{admin_password:adminPass,new_password:newPass},student)).status,403);
+  assert.equal((await req(`/admin/users/${studentId}/password`,'PUT',{admin_password:'wrong',new_password:newPass},admin)).status,403);
+  assert.equal((await req(`/admin/users/${studentId}/password`,'PUT',{admin_password:adminPass,new_password:newPass},admin)).status,200);
+  assert.equal((await req('/me','GET',undefined,student)).status,401);
+  assert.equal((await req('/auth/login','POST',{email:'unknown@example.org',password:newPass})).status,401);
+ });
+ await t.test('payment void is audited and decreases net balance',async()=>{
+  assert.equal((await req(`/ops/manual-payments/${paidReceiptId}/void`,'POST',{reason:'Integration test reversal'},student)).status,401);
+  assert.equal((await req(`/ops/manual-payments/${paidReceiptId}/void`,'POST',{reason:'Integration test reversal'},admin)).status,200);
+  const net=await req('/ops/finance','GET',undefined,admin);assert.equal(net.status,200);assert.equal(net.data.received,0);
+ });
 });

@@ -1,5 +1,4 @@
 'use strict';
-const crypto = require('crypto');
 
 /** Real payment, courses chat, direct messages, live lessons + WebRTC signaling. */
 module.exports = function installFeatures({ app, io, db, auth, role, getCourse, isManager, isEnrolled, bad, clean, activity, broadcastCourses }) {
@@ -43,7 +42,7 @@ module.exports = function installFeatures({ app, io, db, auth, role, getCourse, 
   };
   const canDm = (a, b) => {
     if (!a || !b || a.id === b.id) return false;
-    if (a.role === 'admin' || b.role === 'admin') return true;
+    if (['admin','super_admin'].includes(a.role) || ['admin','super_admin'].includes(b.role)) return true;
     return !!db.prepare(`SELECT 1 FROM courses c LEFT JOIN enrollments ea ON ea.course_id=c.id AND ea.user_id=?
       LEFT JOIN enrollments eb ON eb.course_id=c.id AND eb.user_id=?
       WHERE (ea.user_id IS NOT NULL OR c.teacher_id=?) AND (eb.user_id IS NOT NULL OR c.teacher_id=?) LIMIT 1`).get(a.id,b.id,a.id,b.id);
@@ -56,130 +55,14 @@ module.exports = function installFeatures({ app, io, db, auth, role, getCourse, 
     FROM messages m JOIN users u ON u.id=m.sender_id WHERE m.id=?`).get(id);
   const roleAuth = [auth(), role('teacher','admin')];
 
-  // Payme Business Merchant API. Amounts are in tiyin. Never trust redirect or browser as proof of payment.
-  app.post('/api/payments/checkout', auth(), run((req, res) => {
-    const c = getCourse(numberId(req.body?.courseId));
-    if (!c || !c.published) return bad(res, 'Kurs topilmadi', 404);
-    if (isEnrolled(c, req.user) || isManager(c,req.user)) return bad(res, 'Sizda bu kursga kirish huquqi bor');
-    if (c.price <= 0) return bad(res, 'Bepul kursga odatiy tartibda yoziling');
-    if (!process.env.PAYME_MERCHANT_ID || !process.env.PAYME_MERCHANT_KEY) return bad(res, "Haqiqiy to'lov tizimi hali sozlanmagan. Administrator merchant kalitlarini ulashi kerak.", 503);
-    const oldOrder = db.prepare("SELECT id FROM orders WHERE user_id=? AND course_id=? AND status='pending' AND amount=? ORDER BY id DESC LIMIT 1").get(req.user.id,c.id,c.price);
-    const orderId = oldOrder?.id || db.prepare('INSERT INTO orders(user_id,course_id,amount) VALUES(?,?,?)').run(req.user.id,c.id,c.price).lastInsertRowid;
-    const amount = c.price * 100;
-    const base = `m=${process.env.PAYME_MERCHANT_ID};ac.order_id=${orderId};a=${amount};l=uz`;
-    const returnUrl = process.env.PUBLIC_URL;
-    const params = returnUrl ? base + `;c=${encodeURIComponent(returnUrl.replace(/\/$/,'') + '/#/payments')}` : base;
-    const checkoutBase = process.env.PAYME_CHECKOUT_URL || 'https://checkout.paycom.uz';
-    if (!/^https:\/\/([\w.-]+)(\/[^?#]*)?$/.test(checkoutBase)) return bad(res, "PAYME_CHECKOUT_URL noto'g'ri", 500);
-    res.json({ orderId: Number(orderId), checkoutUrl: checkoutBase.replace(/\/$/,'') + '/' + Buffer.from(params).toString('base64'), status: 'pending' });
-  }));
+  // v5 OFFLINE ACCOUNTING: do not accept merchant requests, even if legacy keys exist.
+  app.all('/api/payments/checkout',(_req,res)=>res.status(410).json({error:'Onlayn to‘lov o‘chirilgan. To‘lovni administrator kiritadi.'}));
+  app.all('/api/payments/payme',(_req,res)=>res.status(410).json({error:'To‘lov provayderi integratsiyasi o‘chirilgan.'}));
+  // Preserve historical paid orders read-only for migration and audits.
   app.get('/api/payments/my', auth(), (req,res) => res.json(db.prepare(`SELECT o.id,o.course_id,o.amount,o.status,o.created_at,o.paid_at,c.title AS course_title
     FROM orders o JOIN courses c ON c.id=o.course_id WHERE o.user_id=? ORDER BY o.id DESC LIMIT 80`).all(req.user.id)));
-  app.get('/api/admin/payments', auth(), role('admin'), (req,res) => res.json(db.prepare(`SELECT o.id,o.course_id,o.user_id,o.amount,o.status,o.created_at,o.paid_at,c.title AS course_title,u.name AS user_name,u.email
+  app.get('/api/admin/payments',auth(),role('admin'),(req,res)=>res.json(db.prepare(`SELECT o.id,o.course_id,o.user_id,o.amount,o.status,o.created_at,o.paid_at,c.title AS course_title,u.name AS user_name,u.email
     FROM orders o JOIN courses c ON c.id=o.course_id JOIN users u ON u.id=o.user_id ORDER BY o.id DESC LIMIT 500`).all()));
-
-  const rpcError = (code, message, data) => ({ error: { code, message: { uz:message, ru:message, en:message }, ...(data ? {data} : {}) } });
-  const transactionReply = t => ({ transaction:String(t.order_id), state:t.state, create_time:t.create_time, perform_time:t.perform_time, cancel_time:t.cancel_time, ...(t.reason != null ? {reason:t.reason}: {}) });
-  app.post('/api/payments/payme', (req,res) => {
-    // JSON-RPC status is HTTP 200, even for protocol errors.
-    const requestId = req.body && req.body.id !== undefined ? req.body.id : null;
-    const respond = data => res.status(200).json({ id: requestId, ...data });
-    const key = process.env.PAYME_MERCHANT_KEY;
-    const provided = req.headers.authorization || '';
-    const expected = 'Basic ' + Buffer.from('Paycom:' + (key || '')).toString('base64');
-    if (!key || provided.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(provided),Buffer.from(expected)))
-      return respond(rpcError(-32504,'Avtorizatsiya xatosi'));
-    const {method,params={}} = req.body || {};
-    const tx = id => db.prepare('SELECT * FROM payme_transactions WHERE payme_id=?').get(id);
-    const findOrder = p => db.prepare('SELECT * FROM orders WHERE id=?').get(numberId(p?.account?.order_id));
-    const verifyOrder = p => {
-      const o = findOrder(p);
-      if (!o) return {error:rpcError(-31050,'Buyurtma topilmadi','account.order_id')};
-      if (!Number.isSafeInteger(p?.amount) || p.amount !== o.amount*100) return {error:rpcError(-31001,'Summa mos kelmadi')};
-      if (o.status !== 'pending') return {error:rpcError(-31008,"Buyurtma to'langan yoki bekor qilingan")};
-      const paidOther = db.prepare("SELECT 1 FROM orders WHERE user_id=? AND course_id=? AND status='paid' AND id!=? LIMIT 1").get(o.user_id,o.course_id,o.id);
-      if(paidOther) return {error:rpcError(-31008,"Ushbu kurs avval to'langan")};
-      return {order:o};
-    };
-    try {
-      if (method === 'CheckPerformTransaction') {
-        const v=verifyOrder(params); return respond(v.error || {result:{allow:true}});
-      }
-      if (method === 'CreateTransaction') {
-        if (typeof params.id !== 'string' || !Number.isSafeInteger(params.time)) return respond(rpcError(-32602,"Parametrlar noto'g'ri"));
-        const prev=tx(params.id);
-        if (prev) {
-          if(params.amount !== prev.amount || Number(params?.account?.order_id) !== prev.order_id) return respond(rpcError(-31008,'Tranzaksiya ma’lumotlari mos kelmadi'));
-          if(prev.state===1 && Date.now()-prev.create_time>=12*60*60*1000) {
-            db.prepare('UPDATE payme_transactions SET state=-1,cancel_time=?,reason=4 WHERE payme_id=?').run(Date.now(),params.id);
-            return respond({result:{transaction:String(prev.order_id),state:-1,create_time:prev.create_time}});
-          }
-          return respond({result:{transaction:String(prev.order_id),state:prev.state,create_time:prev.create_time}});
-        }
-        const v=verifyOrder(params); if(v.error) return respond(v.error);
-        const open=db.prepare('SELECT * FROM payme_transactions WHERE order_id=? AND state=1').get(v.order.id);
-        if (open) return respond(rpcError(-31099,'Buyurtma uchun tranzaksiya yaratilgan'));
-        const now=Date.now();
-        db.prepare('INSERT INTO payme_transactions(payme_id,order_id,amount,payme_time,create_time,state) VALUES(?,?,?,?,?,1)')
-          .run(params.id,v.order.id,params.amount,params.time,now);
-        return respond({result:{transaction:String(v.order.id),state:1,create_time:now}});
-      }
-      if (method === 'PerformTransaction') {
-        const t=tx(params.id); if(!t) return respond(rpcError(-31003,'Tranzaksiya topilmadi'));
-        if(t.state===2) return respond({result:{transaction:String(t.order_id),state:2,perform_time:t.perform_time}});
-        if(t.state!==1) return respond(rpcError(-31008,'Tranzaksiya bajarib bo‘lmaydi'));
-        if(Date.now()-t.create_time >= 12*60*60*1000) {
-          db.prepare('UPDATE payme_transactions SET state=-1,cancel_time=?,reason=4 WHERE payme_id=?').run(Date.now(),params.id);
-          return respond(rpcError(-31008,'Tranzaksiya muddati tugagan'));
-        }
-        const o=db.prepare('SELECT * FROM orders WHERE id=?').get(t.order_id);
-        if(o && db.prepare("SELECT 1 FROM orders WHERE user_id=? AND course_id=? AND status='paid' AND id!=? LIMIT 1").get(o.user_id,o.course_id,o.id)) return respond(rpcError(-31008,'Bu kurs uchun avvaldan to‘lov tasdiqlangan'));
-        if(!o || o.status!=='pending') return respond(rpcError(-31008,"Buyurtma holati to'g'ri emas"));
-        const now=Date.now();
-        db.transaction(() => {
-          db.prepare('UPDATE payme_transactions SET state=2,perform_time=? WHERE payme_id=?').run(now,params.id);
-          db.prepare("UPDATE orders SET status='paid',paid_at=CURRENT_TIMESTAMP WHERE id=?").run(o.id);
-          db.prepare('INSERT OR IGNORE INTO enrollments(user_id,course_id) VALUES(?,?)').run(o.user_id,o.course_id);
-        })();
-        notify(o.user_id,"To'lov tasdiqlandi, kurs ochildi!",'#/course/'+o.course_id);
-        io.emit('courses:changed'); io.emit('stats:changed');
-        return respond({result:{transaction:String(t.order_id),state:2,perform_time:now}});
-      }
-      if (method === 'CancelTransaction') {
-        const t=tx(params.id); if(!t) return respond(rpcError(-31003,'Tranzaksiya topilmadi'));
-        if(t.state<0) return respond({result:{transaction:String(t.order_id),state:t.state,cancel_time:t.cancel_time}});
-        const o=db.prepare('SELECT * FROM orders WHERE id=?').get(t.order_id);
-        if(t.state===2) {
-          // Once lessons have been consumed, refunds require manual merchant review.
-          const consumed=db.prepare(`SELECT 1 FROM progress p JOIN lessons l ON l.id=p.lesson_id WHERE p.user_id=? AND l.course_id=? LIMIT 1`).get(o.user_id,o.course_id);
-          if(consumed) return respond(rpcError(-31007,'Kursdan foydalanilgan: qaytarishni administrator hal qiladi'));
-        }
-        const now=Date.now(), state=t.state===2?-2:-1;
-        db.transaction(() => {
-          db.prepare('UPDATE payme_transactions SET state=?,cancel_time=?,reason=? WHERE payme_id=?').run(state,now,Number.isInteger(params.reason)?params.reason:10,params.id);
-          db.prepare("UPDATE orders SET status='cancelled' WHERE id=?").run(t.order_id);
-          if(state===-2) {
-            const otherPaid=db.prepare("SELECT 1 FROM orders WHERE user_id=? AND course_id=? AND status='paid' AND id!=? LIMIT 1").get(o.user_id,o.course_id,o.id);
-            if(!otherPaid) db.prepare('DELETE FROM enrollments WHERE user_id=? AND course_id=?').run(o.user_id,o.course_id);
-          }
-        })();
-        if(state===-2) notify(o.user_id,"To'lov bekor qilindi",'#/payments');
-        io.emit('courses:changed');
-        return respond({result:{transaction:String(t.order_id),state,cancel_time:now}});
-      }
-      if (method === 'CheckTransaction') {
-        const t=tx(params.id); if(!t) return respond(rpcError(-31003,'Tranzaksiya topilmadi'));
-        return respond({result:transactionReply(t)});
-      }
-      if (method === 'GetStatement') {
-        const from=Number(params.from),to=Number(params.to);
-        if(!Number.isSafeInteger(from)||!Number.isSafeInteger(to)||from>to) return respond(rpcError(-32602,'Sana noto‘g‘ri'));
-        const rows=db.prepare('SELECT * FROM payme_transactions WHERE payme_time BETWEEN ? AND ? ORDER BY payme_time ASC').all(from,to);
-        return respond({result:{transactions:rows.map(t=>({id:t.payme_id,time:t.payme_time,amount:t.amount,account:{order_id:String(t.order_id)},...transactionReply(t)}))}});
-      }
-      return respond(rpcError(-32601,'Metod topilmadi'));
-    } catch(e) {console.error('Payme RPC failure:',e.message); return respond(rpcError(-32400,'Server xatosi'));}
-  });
 
   // Messaging and conversations.
   app.get('/api/contacts', auth(), (req,res) => {
@@ -194,7 +77,7 @@ module.exports = function installFeatures({ app, io, db, auth, role, getCourse, 
   app.get('/api/chat/direct/:id', auth(), (req,res) => {
     const other=db.prepare('SELECT id,name,role FROM users WHERE id=?').get(numberId(req.params.id));
     if(!canDm(req.user,other)) return bad(res,"Shaxsiy yozishmaga ruxsat yo'q",403);
-    res.json(db.prepare(`SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,u.name sender_name FROM messages m
+    res.json(db.prepare(`SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,u.name sender_name,(SELECT COUNT(*) FROM v6_message_reads r WHERE r.message_id=m.id AND r.reader_id=m.recipient_id) AS is_read FROM messages m
       JOIN users u ON u.id=m.sender_id WHERE (m.sender_id=? AND m.recipient_id=?) OR (m.sender_id=? AND m.recipient_id=?) ORDER BY m.id DESC LIMIT 100`)
       .all(req.user.id,other.id,other.id,req.user.id).reverse());
   });

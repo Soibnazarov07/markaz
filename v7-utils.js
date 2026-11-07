@@ -1,0 +1,10 @@
+'use strict';
+const roles=['super_admin','admin','branch_manager','teacher','student','parent','accountant'];
+const positive=x=>{const n=Number(x);return Number.isSafeInteger(n)&&n>0?n:null;};
+const text=(x,max=150)=>String(x??'').trim().slice(0,max);
+const date=s=>typeof s==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(s)&&!Number.isNaN(Date.parse(s+'T00:00:00Z'))&&new Date(s+'T00:00:00Z').toISOString().slice(0,10)===s;
+const month=s=>typeof s==='string'&&/^\d{4}-(0[1-9]|1[0-2])$/.test(s);
+const csvCell=x=>{const s=String(x??'');const neutral=/^[=+@\-\t\r]/.test(s)?"'"+s:s;return /[",\r\n]/.test(neutral)?'"'+neutral.replace(/"/g,'""')+'"':neutral;};
+const csv=rows=>'\uFEFF'+rows.map(r=>r.map(csvCell).join(',')).join('\r\n')+'\r\n';
+const canManageGroup=(db,u,g)=>Boolean(g&&u&&(['super_admin','admin'].includes(u.role)||(u.role==='teacher'&&g.teacher_id===u.id)||(u.role==='branch_manager'&&g.branch_id&&db.prepare('SELECT 1 FROM v6_staff_branches WHERE user_id=? AND branch_id=?').get(u.id,g.branch_id))));
+module.exports={roles,positive,text,date,month,csvCell,csv,canManageGroup};
