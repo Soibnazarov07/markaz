@@ -10,8 +10,20 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/design.css">
+  <link rel="stylesheet" href="/premium.css">
+  <link rel="stylesheet" href="/theme-v4.css">
+  <link rel="stylesheet" href="/v6.css">
+  <link rel="stylesheet" href="/v7.css">
+  <link rel="manifest" href="/manifest.webmanifest">
 </head>
 <body>
+<header class="public-header" id="publicHeader" aria-label="Ommaviy sayt menyusi">
+  <a class="public-brand" href="#/"><span class="public-brand-icon" id="publicBrandIcon">E</span><span id="publicBrandName">EduSphere <em>Pro</em></span></a>
+  <nav class="public-navigation" aria-label="Ommaviy sayt navigatsiyasi">
+    <a href="#/">Bosh sahifa</a><a href="#/courses">Kurslar</a><a href="#/articles">Maqolalar</a><a href="#/tests-public">Testlar</a><a href="#/branches">Filiallar</a><a href="#/contact">Kontakt</a>
+  </nav>
+  <div class="public-quick"><button type="button" class="theme-public" data-act="theme" aria-label="Oq yoki qora rejim">☀</button><a id="publicPhone" class="public-phone" href="#/contact">Bog‘lanish</a><a href="#/login" class="public-cta" id="publicAuth">Kirish ↗</a><button class="public-menu-btn" type="button" aria-label="Menyuni ochish" data-act="publicMenu">☰</button></div>
+</header>
 <div class="app-shell">
   <aside class="sidebar" id="sidebar">
     <a href="#/" class="brand"><span class="logo">✦</span><span class="brand-copy"><strong id="brandName">O'quv Markaz</strong><small>Learning management</small></span></a>
@@ -35,5 +47,10 @@
 <script src="/socket.io/socket.io.js"></script>
 <script src="/app.js"></script>
 <script src="/features-ui.js"></script>
+<script src="/cms-ui.js"></script>
+<script src="/operations-ui.js"></script>
+<script src="/v5-ui.js"></script>
+<script src="/v6-ui.js"></script>
+<script src="/v7-ui.js"></script>
 </body>
 </html>

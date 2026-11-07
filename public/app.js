@@ -69,7 +69,7 @@ function videoHtml(u) {
   return '';
 }
 const needLogin = () => { if (!S.user) { location.hash = '#/login'; return true; } return false; };
-const isStaff = () => S.user && (S.user.role === 'teacher' || S.user.role === 'admin');
+const isStaff = () => S.user && (S.user.role === 'teacher' || ['admin','super_admin'].includes(S.user.role));
 
 /* ---------- sozlama, nav ---------- */
 function applySettings() {
@@ -81,7 +81,7 @@ function renderNav() {
   const items = [['#/', 'home', 'Bosh sahifa'], ['#/courses', 'book', 'Kurslar']];
   if (u) items.push(['#/me', 'user', 'Kabinet']);
   if (isStaff()) items.push(['#/teacher', 'board', "O'qituvchi"]);
-  if (u && u.role === 'admin') items.push(['#/admin', 'shield', 'Admin']);
+  if (u && ['admin','super_admin'].includes(u.role)) items.push(['#/admin', 'shield', 'Admin']);
   const h = location.hash || '#/';
   $('#dock').innerHTML = items.map(([href, ic, label]) => {
     const on = href === '#/' ? (h === '#/' || h === '#') : (h === href || h.startsWith(href + '/') || (href === '#/teacher' && h.startsWith('#/manage')));
@@ -109,6 +109,7 @@ function connectSocket() {
     toast(a.text);
   });
   socket.on('result', r => { /* natija foydalanuvchining o'z sahifasida ko'rsatiladi */ });
+  socket.on('security:session-revoked', () => { localStorage.removeItem('t'); S.token = null; S.user = null; socket?.disconnect(); renderNav(); location.hash = '#/login'; toast('Administrator parolni yangiladi. Qayta kiring.', 'ok'); });
   socket.on('role:changed', async () => { try { S.user = await api('/me'); renderNav(); toast("Rolingiz o'zgartirildi", 'ok'); softRefresh(); } catch { } });
 }
 async function refreshStats() {
@@ -277,11 +278,12 @@ function authForm() {
     <form data-form="auth">
       ${reg ? '<div class="fg"><label class="f">Ism familiya</label><input class="in" name="name" required minlength="2" autocomplete="name"></div>' : ''}
       <div class="fg"><label class="f">Email</label><input class="in" type="email" name="email" required autocomplete="email"></div>
-      <div class="fg"><label class="f">Parol</label><input class="in" type="password" name="password" required minlength="6" autocomplete="${reg ? 'new-password' : 'current-password'}"></div>
+      <div class="fg"><label class="f">Parol</label><input class="in" type="password" name="password" required minlength="12" maxlength="128" autocomplete="${reg ? 'new-password' : 'current-password'}"></div>
+      ${!reg?'<div class="fg"><label class="f">Authenticator kodi (2FA yoqilgan bo‘lsa)</label><input class="in" id="mfaCode" name="totp" inputmode="numeric" maxlength="6" pattern="[0-9]{6}" placeholder="6 xonali kod"></div>':''}
       <button class="btn primary" style="width:100%" type="submit">${reg ? "Ro'yxatdan o'tish" : 'Kirish'}</button>
     </form></div>`;
 }
-function loginPage() { if (S.user) { location.hash = '#/me'; return; } view(authForm()); }
+function loginPage() { if (S.user) { location.hash = '#/workspace'; return; } view(authForm()); }
 
 /* ---------- o'qituvchi ---------- */
 async function teacherPage() {
@@ -294,7 +296,7 @@ async function teacherPage() {
   <div class="kpis"><div class="kpi glass"><b>${cs.length}</b><span class="muted">kurs</span></div><div class="kpi glass"><b>${students}</b><span class="muted">yozilgan o'quvchi</span></div><div class="kpi glass"><b>${cs.reduce((a, c) => a + c.tests_count, 0)}</b><span class="muted">test</span></div></div>
   <div class="cols">
     <div class="glass pad tw"><h2 style="font-size:1.3rem;margin-bottom:8px">Kurslarim</h2>
-    ${cs.length ? `<table><tr><th>Kurs</th><th>Dars</th><th>Test</th><th>O'quvchi</th><th></th></tr>${cs.map(c => `<tr><td><b>${esc(c.cover)} ${esc(c.title)}</b>${c.published ? '' : ' <span class="tag warn">Qoralama</span>'}${S.user.role === 'admin' ? `<br><small class="muted">${esc(c.teacher_name || '')}</small>` : ''}</td><td>${c.lessons_count}</td><td>${c.tests_count}</td><td>${c.students_count}</td>
+    ${cs.length ? `<table><tr><th>Kurs</th><th>Dars</th><th>Test</th><th>O'quvchi</th><th></th></tr>${cs.map(c => `<tr><td><b>${esc(c.cover)} ${esc(c.title)}</b>${c.published ? '' : ' <span class="tag warn">Qoralama</span>'}${['admin','super_admin'].includes(S.user.role) ? `<br><small class="muted">${esc(c.teacher_name || '')}</small>` : ''}</td><td>${c.lessons_count}</td><td>${c.tests_count}</td><td>${c.students_count}</td>
       <td style="white-space:nowrap"><a class="btn sm primary" href="#/manage/${c.id}">Boshqarish</a> <button class="btn sm danger" data-act="delCourse" data-id="${c.id}">O'chirish</button></td></tr>`).join('')}</table>` : '<p class="muted">Hali kurs yo\'q. «Yangi kurs» tugmasini bosing.</p>'}</div>
     <div class="glass pad"><h2 style="font-size:1.3rem;margin-bottom:8px">Jonli hodisalar</h2><div class="feed" id="feed">${feedHtml()}</div></div>
   </div>`);
@@ -384,7 +386,7 @@ function collectQuestions() {
 /* ---------- admin ---------- */
 async function adminPage() {
   if (needLogin()) return;
-  if (!S.user || S.user.role !== 'admin') { view('<div class="glass pad center">Bu bo\'lim faqat administrator uchun.</div>'); return; }
+  if (!S.user || !['admin','super_admin'].includes(S.user.role)) { view('<div class="glass pad center">Bu bo\'lim faqat administrator uchun.</div>'); return; }
   const tabs = [['stats', 'Statistika'], ['users', 'Foydalanuvchilar'], ['courses', 'Kurslar'], ['settings', 'Sozlamalar']];
   let body = '';
   if (AD.tab === 'stats') {
@@ -396,12 +398,12 @@ async function adminPage() {
   } else if (AD.tab === 'users') {
     const us = await api('/admin/users');
     body = `<div class="cols"><div class="glass pad tw"><h2 style="font-size:1.3rem;margin-bottom:8px">Foydalanuvchilar (${us.length})</h2><table><tr><th>Ism</th><th>Email</th><th>Rol</th><th></th></tr>${us.map(u => `<tr><td><b>${esc(u.name)}</b></td><td class="muted">${esc(u.email)}</td>
-      <td><select class="in" style="padding:.4rem .7rem" data-role="${u.id}" ${u.id === S.user.id ? 'disabled' : ''}>${[['student', "O'quvchi"], ['teacher', "O'qituvchi"], ['admin', 'Admin']].map(([v, n]) => `<option value="${v}" ${u.role === v ? 'selected' : ''}>${n}</option>`).join('')}</select></td>
-      <td>${u.id === S.user.id ? '' : `<button class="btn sm danger" data-act="delUser" data-id="${u.id}">O'chirish</button>`}</td></tr>`).join('')}</table></div>
+      <td><select class="in" style="padding:.4rem .7rem" data-role="${u.id}" ${u.id === S.user.id ? 'disabled' : ''}>${[['student', "O'quvchi"], ['teacher', "O'qituvchi"], ...(S.user.role==='super_admin'?[['admin','Admin']]:[]), ['parent','Ota-ona'], ['accountant','Buxgalter']].map(([v, n]) => `<option value="${v}" ${u.role === v ? 'selected' : ''}>${n}</option>`).join('')}</select></td>
+      <td><button class="btn sm" type="button" data-act="adminResetPassword" data-id="${u.id}" data-name="${esc(u.name)}" ${u.role==='super_admin'&&S.user.role!=='super_admin'?'disabled':''}>Parolni tiklash</button> ${u.id === S.user.id ? '' : `<button class="btn sm danger" data-act="delUser" data-id="${u.id}">O'chirish</button>`}</td></tr>`).join('')}</table></div>
       <form class="glass pad" data-form="newUser"><h2 style="font-size:1.3rem;margin-bottom:10px">Yangi foydalanuvchi</h2>
       <div class="fg"><label class="f">Ism</label><input class="in" name="name" required></div><div class="fg"><label class="f">Email</label><input class="in" type="email" name="email" required></div>
-      <div class="fg"><label class="f">Parol</label><input class="in" name="password" required minlength="6"></div>
-      <div class="fg"><label class="f">Rol</label><select class="in" name="role"><option value="teacher">O'qituvchi</option><option value="student">O'quvchi</option><option value="admin">Admin</option></select></div>
+      <div class="fg"><label class="f">Parol</label><input class="in" name="password" type="password" autocomplete="new-password" required minlength="12" maxlength="128"></div>
+      <div class="fg"><label class="f">Rol</label><select class="in" name="role"><option value="teacher">O'qituvchi</option><option value="student">O'quvchi</option>${S.user.role==='super_admin'?'<option value="admin">Admin</option>':''}<option value="parent">Ota-ona</option><option value="accountant">Buxgalter</option><option value="branch_manager">Filial menejeri</option></select></div>
       <button class="btn primary" type="submit">Qo'shish</button></form></div>`;
   } else if (AD.tab === 'courses') {
     const cs = await api('/manage/courses');
@@ -440,7 +442,7 @@ async function guard(fn) { try { await fn(); } catch (e) { toast(e.message, 'err
 const actions = {
   theme() {
     const r = document.documentElement, d = r.dataset.theme === 'dark' ? 'light' : 'dark';
-    r.dataset.theme = d; localStorage.setItem('theme', d); renderNav();
+    r.dataset.theme = d; localStorage.setItem('theme', d); document.querySelectorAll('.theme-public').forEach(x=>x.textContent=d==='dark'?'☀':'☾'); renderNav();
   },
   logout() { localStorage.removeItem('t'); S.token = null; S.user = null; S.chat = []; connectSocket(); renderNav(); location.hash = '#/'; route(); toast('Chiqdingiz'); },
   closeModal,
@@ -477,6 +479,18 @@ const actions = {
     }).finally(() => { el.disabled = false; el.textContent = old; });
   },
   admtab(el) { AD.tab = el.dataset.tab; return guard(adminPage); },
+  adminResetPassword(el) {
+    const uid = Number(el.dataset.id);
+    if (!Number.isSafeInteger(uid) || uid <= 0) return;
+    modal(`<h2>Parolni administrator orqali tiklash</h2><p class="muted" style="margin:12px 0">Foydalanuvchi: <b>${esc(el.dataset.name)}</b>. Yangi parol o‘rnatilsa, foydalanuvchining barcha eski sessiyalari bekor bo‘ladi.</p>
+      <form data-form="adminResetPassword" data-id="${uid}">
+       <div class="fg"><label class="f">Administratorning joriy paroli</label><input class="in" name="admin_password" type="password" autocomplete="current-password" required></div>
+       <div class="fg"><label class="f">Yangi parol (12–128 belgi)</label><input class="in" name="new_password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
+       <div class="fg"><label class="f">Yangi parolni tasdiqlang</label><input class="in" name="confirm_password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
+       <label class="row" style="margin-bottom:16px"><input type="checkbox" name="reset_2fa" value="true"> Agar Authenticator kodi yo‘qolgan bo‘lsa, 2FA himoyasini ham tiklash</label>
+       <div class="row between"><button class="btn" data-act="closeModal" type="button">Bekor qilish</button><button class="btn primary" type="submit">Parolni almashtirish</button></div>
+      </form>`);
+  },
   delUser(el) { if (!confirm('Foydalanuvchini o\'chirasizmi?')) return; return guard(async () => { await api('/admin/users/' + el.dataset.id, 'DELETE'); adminPage(); }); }
 };
 
@@ -484,10 +498,11 @@ const forms = {
   auth(f) {
     const d = Object.fromEntries(new FormData(f));
     return guard(async () => {
+      if(AUTHMODE === 'login'){const otp=document.getElementById('mfaCode');if(otp?.value)d.totp=otp.value;}
       const r = await api(AUTHMODE === 'register' ? '/auth/register' : '/auth/login', 'POST', d);
       S.token = r.token; S.user = r.user; localStorage.setItem('t', r.token);
       connectSocket(); renderNav(); toast(`Xush kelibsiz, ${r.user.name.split(' ')[0]}!`, 'ok');
-      location.hash = r.user.role === 'admin' ? '#/admin' : r.user.role === 'teacher' ? '#/teacher' : '#/me';
+      location.hash = '#/workspace';
     });
   },
   newCourse(f) {
@@ -501,6 +516,19 @@ const forms = {
   lesson(f) {
     const d = Object.fromEntries(new FormData(f));
     return guard(async () => { await api(`/courses/${MG.id}/lessons`, 'POST', d); toast("Dars qo'shildi", 'ok'); renderManage(); });
+  },
+  adminResetPassword(f) {
+    return guard(async () => {
+      const data = Object.fromEntries(new FormData(f));
+      if(data.new_password!==data.confirm_password)throw Error('Yangi parollar mos emas');
+      if(!confirm('Tanlangan foydalanuvchining parolini almashtirasizmi?'))return;
+      const r=await api('/admin/users/'+f.dataset.id+'/password','PUT',{
+        admin_password:data.admin_password, new_password:data.new_password,reset_2fa:data.reset_2fa==='true'
+      });
+      f.reset();closeModal();toast('Yangi parol saqlandi. Eski sessiyalar bekor qilindi.','ok');
+      if(r.logout_required){localStorage.removeItem('t');S.token=null;S.user=null;socket?.disconnect();location.hash='#/login';}
+      else adminPage();
+    });
   },
   newUser(f) {
     const d = Object.fromEntries(new FormData(f));
@@ -554,7 +582,7 @@ async function route(keepScroll) {
 window.addEventListener('hashchange', () => route());
 
 (async function init() {
-  document.documentElement.dataset.theme = localStorage.getItem('theme') || 'dark';
+  document.documentElement.dataset.theme = localStorage.getItem('theme') || 'dark'; document.querySelectorAll('.theme-public').forEach(x=>x.textContent=document.documentElement.dataset.theme==='dark'?'☀':'☾');
   try { S.settings = await api('/settings'); } catch { }
   applySettings();
   if (S.token) {

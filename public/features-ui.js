@@ -17,9 +17,10 @@ const startConn = connectSocket;
 connectSocket = function() {
   startConn();
   socket.__academyEnhanced = true;
+  socket.on('chat:read',event=>{const el=$(`[data-msg-id="${Number(event.message_id)}"] .read-status`);if(el)el.textContent='✓✓ O‘qilgan';});
   socket.on('chat:new',m=>{
     const belongs=U.chatScope==='course' ? Number(m.course_id)===Number(U.chatId) : U.chatScope==='direct' && ((m.sender_id==U.chatId&&m.recipient_id==S.user?.id)||(m.sender_id==S.user?.id&&m.recipient_id==U.chatId));
-    if(belongs && !U.chatItems.some(x=>x.id===m.id)) {U.chatItems.push(m); drawMessages();}
+    if(belongs && !U.chatItems.some(x=>x.id===m.id)) {U.chatItems.push(m); drawMessages();if(U.chatScope==='direct'&&m.sender_id!==S.user.id)api('/v6/chat/'+m.id+'/read','POST').catch(()=>{});}
   });
   socket.on('notify',n=>{ U.notices++; toast(n.text,'ok');if(CUR.name==='notificationsPage') route(true); });
   socket.on('live:changed',()=>{if(CUR.name==='liveListPage')route(true);});
@@ -82,8 +83,8 @@ async function proCoursePage(id){
   if(!COURSE || COURSE.id!=id) return;
   if(COURSE.price>0 && !COURSE.enrolled && !COURSE.manager){
     const enrollBtn=$('[data-act="enroll"]');
-    if(enrollBtn) enrollBtn.textContent=S.user?`Payme orqali to'lash • ${money(COURSE.price)}`:'Kirish va to‘lash';
-    $('#view').insertAdjacentHTML('beforeend','<div class="payment-note">🔒 Pullik kurs faqat haqiqiy to‘lov Payme tomonidan tasdiqlangach ochiladi. To‘lov linki tizim tomonidan yaratiladi.</div>');
+    if(enrollBtn) enrollBtn.textContent=S.user?`Kursga ariza berish • ${money(COURSE.price)}`:'Kirish va ariza berish';
+    $('#view').insertAdjacentHTML('beforeend','<div class="payment-note">Pullik kurs uchun ariza yuboring. Administrator naqd yoki bank orqali qabul qilingan to‘lovni qo‘lda qayd etadi.</div>');
   }
   if(COURSE.enrolled||COURSE.manager) $('#view').insertAdjacentHTML('beforeend',`<div class="section-title"><h2>Kurs guruhiga qo'shiling</h2></div><div class="glass pad row between"><div><b>✉ Kurs a'zolari bilan yozishish</b><p class="muted">Savollar va topshiriqlarni muhokama qiling</p></div><a class="btn primary" href="#/messages/course/${COURSE.id}">Suhbatni ochish →</a></div>`);
 }
@@ -111,7 +112,7 @@ routes.push([/^#\/notifications$/,notificationsPage]);
 actions.markNotices=()=>guard(async()=>{await api('/notifications/read','POST');toast('O‘qilgan deb belgilandi','ok');notificationsPage();});
 
 // Contacts, course chat and direct messaging.
-function drawMessages(){const el=$('#messagesStream');if(!el)return;el.innerHTML=U.chatItems.length?U.chatItems.map(m=>`<div class="bubble ${m.sender_id===S.user?.id?'self':''}"><small>${esc(m.sender_name)} · ${fmtDate(m.created_at)}</small><p>${esc(m.body)}</p></div>`).join(''):'<div class="empty-state">Bu suhbatda hozircha xabar yo‘q. Birinchi xabarni yozing.</div>';el.scrollTop=el.scrollHeight;}
+function drawMessages(){const el=$('#messagesStream');if(!el)return;el.innerHTML=U.chatItems.length?U.chatItems.map(m=>`<div class="bubble ${m.sender_id===S.user?.id?'self':''}" data-msg-id="${m.id}"><small>${esc(m.sender_name)} · ${fmtDate(m.created_at)}</small><p>${esc(m.body)}</p><a class="chat-file-link" href="#/workspace/files/chat/${m.id}">📎 Fayllar</a>${m.sender_id===S.user?.id&&U.chatScope==='direct'?`<small class="read-status">${m.is_read?'✓✓ O‘qilgan':'✓ Yuborilgan'}</small>`:''}</div>`).join(''):'<div class="empty-state">Bu suhbatda hozircha xabar yo‘q. Birinchi xabarni yozing.</div>';el.scrollTop=el.scrollHeight;}
 async function messagesPage(type,id){
   if(needLogin())return;
   if(U.chatScope==='course'&&U.chatId)socket?.emit('course:leave',{courseId:U.chatId});
@@ -125,7 +126,7 @@ async function messagesPage(type,id){
   if(U.chatScope){
     if(targetType==='course')socket?.emit('course:join',{courseId:targetId});
     U.chatItems=await api('/chat/'+(targetType==='course'?'course/':'direct/')+targetId);
-    if(U.chatId===targetId)drawMessages();
+    if(U.chatId===targetId){drawMessages();if(U.chatScope==='direct')U.chatItems.filter(m=>m.sender_id!==S.user.id).forEach(m=>api('/v6/chat/'+m.id+'/read','POST').catch(()=>{}));}
   }
 }
 routes.push([/^#\/messages$/,messagesPage]);
@@ -254,7 +255,7 @@ window.addEventListener('hashchange',()=>{
 // Admin console: real data and extended management.
 async function adminPro(){
   if(needLogin())return;
-  if(S.user?.role!=='admin'){view('<div class="glass pad">Administrator huquqi kerak.</div>');return;}
+  if(!['admin','super_admin'].includes(S.user?.role)){view('<div class="glass pad">Administrator huquqi kerak.</div>');return;}
   const tabs=[['stats','Ko‘rsatkichlar'],['users','Foydalanuvchilar'],['courses','Kurslar'],['payments',"To‘lovlar"],['live','Jonli darslar'],['settings','Sozlamalar']];
   let body='';
   if(AD.tab==='stats'){
@@ -271,13 +272,12 @@ async function adminPro(){
     const cs=await api('/manage/courses');
     body=`<div class="glass pad tw"><div class="panel-topline"><h3>Kurslarni boshqarish</h3><button class="btn primary" data-act="newCourse">+ Yangi kurs</button></div><table><thead><tr><th>Kurs</th><th>O‘qituvchi</th><th>Narx</th><th>Holat</th><th>Talabalar</th><th>Amallar</th></tr></thead><tbody>${cs.map(c=>`<tr><td><b>${esc(c.cover)} ${esc(c.title)}</b></td><td>${esc(c.teacher_name||'—')}</td><td>${money(c.price)}</td><td>${c.published?'<span class="status paid">E’lon qilingan</span>':'<span class="status pending">Qoralama</span>'}</td><td>${c.students_count}</td><td><a class="btn sm" href="#/manage/${c.id}">Tahrirlash</a> <button class="btn sm danger" data-act="delCourse" data-id="${c.id}">O'chirish</button></td></tr>`).join('')}</tbody></table></div>`;
   }else if(AD.tab==='payments'){
-    const orders=await api('/admin/payments');
-    body=`<div class="glass pad tw"><div class="panel-topline"><h3>Payme tranzaksiyalari</h3><span class="muted">${orders.length} ta buyurtma</span></div><table><thead><tr><th>ID</th><th>Mijoz</th><th>Kurs</th><th>Summa</th><th>Holat</th><th>Sana</th></tr></thead><tbody>${orders.map(o=>`<tr><td><b>#${o.id}</b></td><td>${esc(o.user_name)}<small class="muted" style="display:block">${esc(o.email)}</small></td><td>${esc(o.course_title)}</td><td>${money(o.amount)}</td><td>${statusBadge(o.status)}</td><td class="muted">${fmtDate(o.created_at)}</td></tr>`).join('')}</tbody></table>${orders.length?'':'<div class="empty-state">Hozircha buyurtmalar yo‘q.</div>'}</div><div class="payment-note">To‘lov holatini administrator qo‘lda “paid” qila olmaydi. Faqat Payme tomonidan to‘g‘ri imzolangan /api/payments/payme so‘rovidagi PerformTransaction tasdiqlaydi.</div>`;
+    body=`<div class="glass pad"><h3>To‘lovlarni boshqarish</h3><p class="muted">To‘lovlar administrator tomonidan qo‘lda qayd etiladi: o‘quvchi, summa, sana, kvitansiya va qarzdorlik serverda saqlanadi.</p><a class="btn primary" href="#/ops/manual-payments">To‘lovni kiritish →</a> <a class="btn" href="#/ops/report">Oylik hisobot →</a></div>`;
   }else if(AD.tab==='live'){
     const lessons=await api('/live');
     body=`<div class="glass pad"><div class="panel-topline"><h3>Jonli mashg‘ulotlarni boshqarish</h3><button class="btn primary" data-act="scheduleLive">+ Yangi dars</button></div><div class="live-list">${lessons.map(l=>`${liveCard(l)}<div class="row" style="justify-content:flex-end;margin:-7px 5px 12px 0">${l.status==='scheduled'?`<button class="btn sm primary" data-act="changeLive" data-id="${l.id}" data-status="live">Boshlash</button>`:''}${l.status==='live'?`<button class="btn sm danger" data-act="changeLive" data-id="${l.id}" data-status="ended">Tugatish</button>`:''}${l.status!=='live'?`<button class="btn sm danger" data-act="deleteLive" data-id="${l.id}">O'chirish</button>`:''}</div>`).join('')||'<div class="empty-state">Mashg‘ulotlar yo‘q.</div>'}</div></div>`;
   }else{
-    body=`<div class="glass pad" style="max-width:720px"><h3 style="margin-bottom:14px">Platforma ma’lumotlari</h3><form data-form="settings"><div class="fg"><label class="f">Platforma nomi</label><input class="in" name="name" required maxlength="60" value="${esc(S.settings.name)}"></div><div class="fg"><label class="f">Tavsif</label><textarea class="in" name="tagline">${esc(S.settings.tagline)}</textarea></div><button class="btn primary" type="submit">O‘zgarishlarni saqlash</button></form><hr style="border:0;border-top:1px solid var(--stroke);margin:23px 0"><h3>Xizmat integratsiyalari</h3><p class="muted" style="margin:10px 0">Payme: merchant kalitlari faqat serverning .env konfiguratsiyasida beriladi. Videodarslar: WebRTC + STUN/TURN. AI: Gemini API.</p><p class="payment-note">Kalitlarni brauzerga, HTMLga yoki GitHubga joylashtirmang. Production uchun HTTPS, TURN, zaxira nusxa va integratsion testlar talab etiladi.</p></div>`;
+    body=`<div class="glass pad" style="max-width:720px"><h3 style="margin-bottom:14px">Platforma ma’lumotlari</h3><form data-form="settings"><div class="fg"><label class="f">Platforma nomi</label><input class="in" name="name" required maxlength="60" value="${esc(S.settings.name)}"></div><div class="fg"><label class="f">Tavsif</label><textarea class="in" name="tagline">${esc(S.settings.tagline)}</textarea></div><button class="btn primary" type="submit">O‘zgarishlarni saqlash</button></form><hr style="border:0;border-top:1px solid var(--stroke);margin:23px 0"><h3>Xizmat integratsiyalari</h3><p class="muted" style="margin:10px 0">To‘lovlar: administrator tomonidan qo‘lda kiritiladi. Videodarslar: WebRTC + STUN/TURN. AI: Gemini API.</p><p class="payment-note">Kalitlarni brauzerga, HTMLga yoki GitHubga joylashtirmang. Production uchun HTTPS, TURN, zaxira nusxa va integratsion testlar talab etiladi.</p></div>`;
   }
   view(`<div class="admin-header"><div><div class="eyebrow">MANAGEMENT CONSOLE · ADMIN</div><h1 style="font-size:29px;letter-spacing:-.05em">Boshqaruv markazi</h1><p class="muted">Platforma foydalanuvchilari, kurslar, to‘lovlar va darslar nazorati.</p></div><div class="row"><span class="status paid">● Tizim faol</span><a href="#/" class="btn">Saytga qaytish ↗</a></div></div><nav class="admin-tabs">${tabs.map(([k,n])=>`<button class="${AD.tab===k?'on':''}" data-act="admtab" data-tab="${k}">${n}</button>`).join('')}</nav>${body}`);
 }
